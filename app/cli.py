@@ -279,6 +279,97 @@ def _human_duration(seconds: float) -> str:
     return ", ".join(parts[:2]) or "Less than a minute"
 
 
+def _cpu_counters() -> tuple[int, int] | None:
+    """Return aggregate CPU total and idle counters from procfs."""
+    try:
+        fields = Path("/proc/stat").read_text(encoding="ascii").splitlines()[0].split()
+        if fields[0] != "cpu":
+            return None
+        values = [int(x) for x in fields[1:]]
+        total = sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return total, idle
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _system_cpu_percent(sample_seconds: float = 0.12) -> float | None:
+    first = _cpu_counters()
+    if first is None:
+        return None
+    time.sleep(sample_seconds)
+    second = _cpu_counters()
+    if second is None:
+        return None
+    total_delta = second[0] - first[0]
+    idle_delta = second[1] - first[1]
+    if total_delta <= 0:
+        return None
+    return max(0.0, min(100.0, 100.0 * (total_delta - idle_delta) / total_delta))
+
+
+def _system_resources() -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    cpu = _system_cpu_percent()
+    rows.append(("CPU usage", f"{cpu:.1f}%" if cpu is not None else "Unavailable"))
+    try:
+        mem = {}
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            key, _, value = line.partition(":")
+            parts = value.split()
+            if parts and parts[0].isdigit():
+                mem[key] = int(parts[0]) * 1024
+        total = mem["MemTotal"]
+        available = mem.get("MemAvailable", mem.get("MemFree", 0))
+        used = max(0, total - available)
+        pct = (used / total * 100) if total else 0
+        rows.append(("RAM", f"{_human_size(used)} / {_human_size(total)} ({pct:.1f}%)"))
+    except (OSError, KeyError, ValueError):
+        rows.append(("RAM", "Unavailable"))
+    try:
+        disk = shutil.disk_usage(HOME if HOME.exists() else "/")
+        used = disk.total - disk.free
+        rows.append(("Disk", f"{_human_size(used)} used / {_human_size(disk.free)} free"))
+    except OSError:
+        rows.append(("Disk", "Unavailable"))
+    try:
+        load = Path("/proc/loadavg").read_text(encoding="ascii").split()[:3]
+        rows.append(("Load average", " / ".join(load)))
+    except (OSError, IndexError):
+        rows.append(("Load average", "Unavailable"))
+    try:
+        uptime = float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+        rows.append(("System uptime", _human_duration(uptime)))
+    except (OSError, ValueError, IndexError):
+        rows.append(("System uptime", "Unavailable"))
+    return rows
+
+
+def _process_usage(pid: int, sample_seconds: float = 0.12) -> tuple[float | None, int | None]:
+    """Approximate main-process CPU percent (one core = 100%) and RSS bytes."""
+    def snapshot() -> tuple[int, int] | None:
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            tail = raw[raw.rfind(")") + 2:].split()
+            ticks = int(tail[11]) + int(tail[12])  # utime + stime
+            status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+            rss_kb = next(int(line.split()[1]) for line in status.splitlines()
+                          if line.startswith("VmRSS:"))
+            return ticks, rss_kb * 1024
+        except (OSError, ValueError, StopIteration, IndexError):
+            return None
+    first = snapshot()
+    if first is None:
+        return None, None
+    time.sleep(sample_seconds)
+    second = snapshot()
+    if second is None:
+        return None, first[1]
+    elapsed_ticks = max(0, second[0] - first[0])
+    cpu = elapsed_ticks / os.sysconf("SC_CLK_TCK") / sample_seconds * 100.0
+    return cpu, second[1]
+
+
 # ----------------------------------------------------------------------- systemd info
 def service_info() -> dict[str, str]:
     rc, out = _capture(["systemctl", "show", SERVICE, "-p",
@@ -356,6 +447,8 @@ def cmd_status() -> int:
         rows.append(("Database", "Not created yet"))
     except PermissionError:
         rows.append(("Database", "Permission denied"))
+    except OSError:
+        rows.append(("Database", "Unavailable (filesystem error)"))
     mtime, problem = _last_backup()
     if mtime:
         rows.append(("Last backup", f"{_human_duration(time.time() - mtime)} ago"))
@@ -366,17 +459,31 @@ def cmd_status() -> int:
     if version == "unknown":
         rows.append(("Version source", _version_error() or "VERSION unavailable"))
     tenant_path = _db_path(values).with_name("tenants.sqlite3")
-    if tenant_path.is_file():
+    try:
+        registry_exists = tenant_path.is_file()
+    except (PermissionError, OSError):
+        registry_exists = None
+    if registry_exists is None:
+        rows.append(("Child bots", "Permission denied / registry unavailable"))
+    elif registry_exists:
         try:
             with sqlite3.connect(f"file:{tenant_path}?mode=ro", uri=True, timeout=3) as tenant_db:
                 total, enabled = tenant_db.execute(
                     "SELECT COUNT(*), COALESCE(SUM(enabled), 0) FROM tenants"
                 ).fetchone()
             rows.append(("Child bots", f"{enabled} enabled / {total} registered"))
-        except sqlite3.Error:
+        except (sqlite3.Error, PermissionError, OSError):
             rows.append(("Child bots", "Registry unavailable"))
     else:
         rows.append(("Child bots", "0 registered"))
+    rows.append((" ", ""))
+    rows.append(("SERVER RESOURCES", ""))
+    rows.extend(_system_resources())
+    pid_text = info.get("MainPID", "0")
+    if pid_text.isdigit() and int(pid_text) > 0:
+        proc_cpu, proc_mem = _process_usage(int(pid_text))
+        rows.append(("ZIKO process CPU", f"{proc_cpu:.1f}%" if proc_cpu is not None else "Unavailable"))
+        rows.append(("ZIKO process RAM", _human_size(proc_mem) if proc_mem is not None else "Unavailable"))
     ui.render_status(rows)  # type: ignore[arg-type]
     return 0 if state == "active" else 3
 
@@ -620,6 +727,101 @@ def cmd_config(edit: bool = False) -> int:
     return 0
 
 
+def _telegram_api(token: str, method: str, payload: dict[str, object] | None = None,
+                  timeout: float = 7.0) -> tuple[bool, dict[str, object] | str]:
+    """Call Telegram Bot API without ever returning a URL or token in errors."""
+    from urllib.parse import urlencode
+
+    if not _TOKEN_FORMAT.fullmatch(token):
+        return False, "Token format is invalid"
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    data = urlencode(payload or {}).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        if isinstance(body, dict) and body.get("ok") is True:
+            result = body.get("result", {})
+            return True, result if isinstance(result, dict) else {}
+        description = body.get("description", "Telegram API returned an error") if isinstance(body, dict) else "Invalid API response"
+        return False, redact(str(description)[:240])
+    except urllib.error.HTTPError as exc:
+        # Do not expose the exception: its URL includes the bot token.
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+            message = str(body.get("description", "HTTP error")) if isinstance(body, dict) else "HTTP error"
+        except (ValueError, OSError):
+            message = f"HTTP {exc.code}"
+        return False, redact(message[:240])
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return False, "Network, TLS, timeout, or invalid JSON error"
+
+
+def _telegram_diagnostic_checks(values: dict[str, str] | None) -> list[tuple[str, str, str]]:
+    checks: list[tuple[str, str, str]] = []
+    token = (values or {}).get("BOT_TOKEN", "")
+    if not _TOKEN_FORMAT.fullmatch(token):
+        checks.append(("fail", "Telegram getMe", "Skipped: token is missing or malformed"))
+        return checks
+    ok, result = _telegram_api(token, "getMe")
+    if not ok:
+        checks.append(("fail", "Telegram getMe", str(result)))
+        return checks
+    username = str(result.get("username", "bot")) if isinstance(result, dict) else "bot"
+    checks.append(("ok", "Telegram getMe", f"Token valid; @{username}"))
+    hook_ok, hook = _telegram_api(token, "getWebhookInfo")
+    if not hook_ok:
+        checks.append(("warn", "Webhook / polling", f"getWebhookInfo failed: {hook}"))
+    else:
+        webhook_url = str(hook.get("url", "")) if isinstance(hook, dict) else ""
+        if webhook_url:
+            pending = hook.get("pending_update_count", "?")
+            last_error = str(hook.get("last_error_message", "") or "")
+            checks.append(("ok", "Webhook / polling", f"Webhook configured; pending updates: {pending}"))
+            if last_error:
+                checks.append(("warn", "Webhook delivery", last_error[:220]))
+        else:
+            checks.append(("ok", "Webhook / polling", "No webhook configured; polling mode expected"))
+    return checks
+
+
+def _poller_diagnostics() -> list[tuple[str, str, str]]:
+    checks: list[tuple[str, str, str]] = []
+    matches: list[int] = []
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes().replace(b"\\x00", b" ").decode("utf-8", "replace")
+            except OSError:
+                continue
+            if "app.main" in cmdline and int(entry.name) != os.getpid():
+                matches.append(int(entry.name))
+    except OSError:
+        checks.append(("warn", "Polling processes", "Could not inspect /proc"))
+        return checks
+    # The systemd main process is expected; multiple app.main processes can indicate duplicate pollers.
+    if len(matches) > 1:
+        checks.append(("warn", "Polling processes", f"{len(matches)} app.main processes detected; inspect duplicate pollers"))
+    elif matches:
+        checks.append(("ok", "Polling processes", "One application process detected"))
+    else:
+        checks.append(("warn", "Polling processes", "No app.main process found"))
+    if shutil.which("journalctl"):
+        rc, logs = _capture(["journalctl", "-u", SERVICE, "-n", "250", "--no-pager"])
+        if rc == 0:
+            if "409 Conflict" in logs or "terminated by other getUpdates request" in logs:
+                checks.append(("fail", "Telegram polling conflict", "409 Conflict detected; another poller may be using this token"))
+            else:
+                checks.append(("ok", "Telegram polling conflict", "No recent 409 Conflict in service logs"))
+            if re.search(r"update_id|update received|processing update", logs, re.I):
+                checks.append(("ok", "Update processing logs", "Recent update activity found"))
+            else:
+                checks.append(("warn", "Update processing logs", "No recognizable recent update activity; send a test message to the bot"))
+    return checks
+
+
 def run_checks() -> list[tuple[str, str, str]]:
     checks: list[tuple[str, str, str]] = []
 
@@ -644,9 +846,12 @@ def run_checks() -> list[tuple[str, str, str]]:
     elif problem == "denied":
         add("warn", ".env file", "Read permission denied; run with sudo")
     else:
-        mode = _env_path().stat().st_mode & 0o777
-        add("ok" if not mode & 0o027 else "warn", "Configuration permissions",
-            f"{mode:o}" + ("" if not mode & 0o027 else " (expected root:ziko with mode 640)"))
+        try:
+            mode = _env_path().stat().st_mode & 0o777
+            add("ok" if not mode & 0o027 else "warn", "Configuration permissions",
+                f"{mode:o}" + ("" if not mode & 0o027 else " (expected root:ziko with mode 640)"))
+        except OSError:
+            add("warn", "Configuration permissions", "Could not inspect file metadata")
         values = values or {}
         token = values.get("BOT_TOKEN", "")
         if not token or token.startswith("000000000:REPLACE"):
@@ -677,6 +882,8 @@ def run_checks() -> list[tuple[str, str, str]]:
         add("warn", "Database", "Not created yet (created on first run)")
     except PermissionError:
         add("warn", "Database", "Permission denied; run with sudo")
+    except OSError:
+        add("warn", "Database", "Unavailable (filesystem error)")
 
     if not shutil.which("systemctl"):
         add("fail", "systemd", "systemctl not found")
@@ -695,14 +902,20 @@ def run_checks() -> list[tuple[str, str, str]]:
     for name, level in (("backup.sh", "fail"), ("restore.sh", "fail"),
                         ("restore-platform.sh", "warn"), ("update.sh", "warn"),
                         ("uninstall.sh", "warn")):
-        found = (_scripts_dir() / name).is_file()
-        add("ok" if found else level, f"Script {name}", "Present" if found else "Not found")
+        try:
+            found = (_scripts_dir() / name).is_file()
+        except OSError:
+            found = False
+        add("ok" if found else level, f"Script {name}", "Present" if found else "Not found / inaccessible")
 
     try:
         socket.create_connection(("api.telegram.org", 443), timeout=5).close()
         add("ok", "Telegram connectivity", "api.telegram.org:443")
     except OSError:
         add("warn", "Telegram connectivity", "Connection failed (check network/firewall)")
+
+    checks.extend(_telegram_diagnostic_checks(values))
+    checks.extend(_poller_diagnostics())
 
     try:
         free = shutil.disk_usage(HOME if HOME.is_dir() else "/").free
@@ -728,7 +941,12 @@ def cmd_bots_list() -> int:
         ui.error("Cannot read configuration; run with sudo.")
         return 1
     registry_path = _db_path(values).with_name("tenants.sqlite3")
-    if not registry_path.is_file():
+    try:
+        registry_exists = registry_path.is_file()
+    except (PermissionError, OSError):
+        ui.error("Cannot inspect the child-bot registry (permission or filesystem error).")
+        return 1
+    if not registry_exists:
         ui.info("No child-bot registry exists yet.")
         return 0
     try:
@@ -749,11 +967,31 @@ def cmd_bots_list() -> int:
     return 0
 
 
-def cmd_doctor() -> int:
+def cmd_doctor(send_test: bool = False) -> int:
     ui = _ui()
     with ui.console.status("Running diagnostics..."):
         checks = run_checks()
     ui.render_checks(checks)
+    if send_test:
+        values, problem = _read_env()
+        admins = [x for x in re.split(r"[,;\\s]+", (values or {}).get("ADMIN_IDS", "")) if x]
+        token = (values or {}).get("BOT_TOKEN", "")
+        if problem or not admins or not all(x.isascii() and x.isdigit() and int(x) > 0 for x in admins):
+            ui.error("Cannot send test message: valid BOT_TOKEN and ADMIN_IDS are required.")
+            return 1
+        target = admins[0]
+        if not ui.confirm(f"Send a test message to configured administrator ID {target}?"):
+            ui.info("Test message cancelled.")
+            return 0
+        ok, result = _telegram_api(token, "sendMessage", {
+            "chat_id": target,
+            "text": "ZIKO diagnostic test message. Telegram API and message delivery are working.",
+        })
+        if ok:
+            ui.ok(f"Test message sent to configured administrator ID {target}.")
+        else:
+            ui.error(f"Test message failed: {result}")
+            return 1
     return 1 if any(c[0] == "fail" for c in checks) else 0
 
 
@@ -821,7 +1059,9 @@ def _build_parser() -> argparse.ArgumentParser:
     res.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     cfg = sub.add_parser("config", help="Show configuration (the token is never displayed)")
     cfg.add_argument("--edit", action="store_true", help="Edit the .env file")
-    sub.add_parser("doctor", help="Diagnose and check installation health")
+    doctor = sub.add_parser("doctor", help="Diagnose and check installation health")
+    doctor.add_argument("--send-test", action="store_true",
+                        help="After confirmation, send a test message to the first configured admin")
     sub.add_parser("version", help="Show version")
     un = sub.add_parser("uninstall", help="Uninstall ZIKO (scripts/uninstall.sh)")
     un.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
@@ -889,6 +1129,13 @@ def _interactive() -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if os.geteuid() != 0:
+        print(
+            "Access denied: ZIKO management panel is available to root only.\\n"
+            "Run: sudo ziko",
+            file=sys.stderr,
+        )
+        return 13
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
@@ -914,8 +1161,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_bots_list()
         if c == "uninstall":
             return cmd_uninstall(args.yes)
+        if c == "doctor":
+            return cmd_doctor(args.send_test)
         return {"status": cmd_status, "start": cmd_start, "stop": cmd_stop,
-                "restart": cmd_restart, "backup": cmd_backup, "doctor": cmd_doctor}[c]()
+                "restart": cmd_restart, "backup": cmd_backup}[c]()
     except KeyboardInterrupt:
         print()
         return 130

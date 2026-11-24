@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 die(){ printf '[ziko-github-install] ERROR: %s\n' "$*" >&2; exit 1; }
-[[ $EUID -eq 0 ]] || die "Run with sudo."
+[[ $EUID -eq 0 ]] || die "Root privileges are required. Run: sudo bash install-from-github.sh OWNER/REPOSITORY"
 [[ $# -eq 1 ]] || die "Usage: install-from-github.sh OWNER/REPOSITORY"
 REPO="$1"
 [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ && "$REPO" != "OWNER/REPOSITORY" ]] \

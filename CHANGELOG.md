@@ -1,3 +1,12 @@
+## 1.0.9 maintenance revision (unreleased)
+
+- Require root at the beginning of the installer and for every ZIKO CLI invocation.
+- Add explicit root-only access guidance and post-install instructions.
+- Make dashboard and child-bot registry inspection resilient to filesystem permission errors.
+- Add live host CPU, memory, disk, load and uptime metrics plus main-process CPU/RAM estimates.
+- Expand diagnostics with Telegram `getMe`, webhook/polling mode, recent polling-conflict log checks and optional confirmed test delivery to the first configured administrator.
+- Full Ubuntu 24.04 installation, live Telegram, restore and service lifecycle validation remain pending.
+
 ﻿## 1.0.9
 
 - Add professional CLI update center with stable, specific-release and beta channels.

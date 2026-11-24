@@ -3,6 +3,12 @@
 set -Eeuo pipefail
 umask 022
 
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  printf '[ziko-install] ERROR: Root privileges are required.\\n' >&2
+  printf '[ziko-install] Run: sudo bash install.sh\\n' >&2
+  exit 1
+fi
+
 APP_USER=ziko
 APP_GROUP=ziko
 APP_DIR=/opt/ziko-assistant
@@ -71,7 +77,6 @@ for arg in "$@"; do
   *) die "Unknown option: $arg" ;;
  esac
 done
-[[ $EUID -eq 0 ]] || die "Run as root."
 [[ -r /dev/tty ]] || die "Interactive terminal required for secure token/config confirmation."
 for f in app/main.py app/storage.py requirements.txt pyproject.toml deploy/ziko.service scripts/backup.sh scripts/restore.sh scripts/restore-platform.sh; do
   [[ -f "$SRC/$f" ]] || die "Missing project file: $f"
@@ -271,7 +276,10 @@ if [[ "$START_SERVICE" -eq 1 ]]; then
   for _ in {1..15}; do systemctl is-active --quiet ziko.service && break; sleep 1; done
   systemctl is-active --quiet ziko.service || die "Service failed health check."
 fi
-log "Installation successful. Previous version preserved at: ${PREVIOUS:-none}"
+log "ZIKO installed successfully."
+log "To open management panel, run: ziko"
+log "Root privileges are required."
+log "Previous version preserved at: ${PREVIOUS:-none}"
 log "Auto-reply remains OFF unless explicitly enabled in the application."
 log "App=$APP_DIR Config=$CONF_FILE Database=$DB_FILE Backups=$BACKUP_DIR CLI=$CLI_LINK"
 trap - ERR INT TERM
