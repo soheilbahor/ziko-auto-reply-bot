@@ -8,7 +8,7 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
 from app.tenant_bots import TenantBotManager
