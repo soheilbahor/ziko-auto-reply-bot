@@ -10,8 +10,11 @@ from enum import Enum
 from typing import Any
 
 from aiogram.exceptions import (
-    TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
 )
+
 from app.models import DeliveryOutcome
 
 logger = logging.getLogger("ziko.auto_reply")
@@ -34,15 +37,47 @@ class BusinessMessageEngine:
         self._connection_lock = asyncio.Lock()
 
     async def handle_business_connection(self, connection: Any) -> None:
+        """Persist only a connection whose owner is explicitly allow-listed.
+
+        Telegram's ``BusinessConnection.user.id`` is the canonical owner ID.
+        ``user_chat_id`` is used only as a compatibility fallback when a
+        reduced/test update object omits ``user.id``; it identifies the private
+        chat of the user who connected the bot. Missing or malformed identity
+        always fails closed.
+        """
         user = getattr(connection, "user", None)
-        owner_id = getattr(user, "id", None)
-        if owner_id not in self.settings.admin_ids:
+        raw_owner_id = getattr(user, "id", None)
+        if raw_owner_id is None:
+            raw_owner_id = getattr(connection, "user_chat_id", None)
+        if isinstance(raw_owner_id, bool):
+            logger.warning("Ignoring business connection with invalid owner identity")
+            return
+        configured_owner_id = getattr(self.settings, "business_owner_id", None)
+        if isinstance(raw_owner_id, bool) or isinstance(configured_owner_id, bool):
+            logger.warning("Ignoring business connection with invalid owner identity")
+            return
+        try:
+            owner_id = int(raw_owner_id)
+            expected_owner_id = int(configured_owner_id)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring business connection: BUSINESS_OWNER_ID is missing or invalid")
+            return
+        if owner_id <= 0 or expected_owner_id <= 0 or owner_id != expected_owner_id:
             logger.warning("Ignoring business connection from non-owner")
             return
+
+        connection_id = getattr(connection, "id", None)
+        if not isinstance(connection_id, str) or not connection_id.strip():
+            logger.warning("Ignoring business connection with invalid connection ID")
+            return
+
         rights = getattr(connection, "rights", None)
-        can_reply = bool(getattr(rights, "can_reply", False))
+        # Telegram's optional/missing rights object must never inherit an old
+        # grant. Only an explicit True authorizes replying.
+        can_reply = getattr(rights, "can_reply", False) is True
+        is_enabled = getattr(connection, "is_enabled", False) is True
         await self.db.save_business_connection(
-            str(connection.id), bool(connection.is_enabled), can_reply, int(owner_id)
+            connection_id, is_enabled, can_reply, owner_id
         )
 
     async def handle_business_message(self, message: Any) -> ReplyOutcome:
@@ -54,8 +89,12 @@ class BusinessMessageEngine:
         if getattr(message, "edit_date", None) is not None or sender is None or getattr(sender, "is_bot", False):
             return ReplyOutcome.IGNORED
 
+        # The incoming update's connection ID is not proof of authorization.
+        # A persisted, matching Telegram Business connection is mandatory.
         connection = await self.db.get_business_connection()
-        if connection is None or connection.connection_id != connection_id:
+        if connection is None:
+            return ReplyOutcome.IGNORED
+        if connection.connection_id != connection_id:
             return ReplyOutcome.IGNORED
         if not connection.is_enabled or not connection.can_reply:
             return ReplyOutcome.IGNORED

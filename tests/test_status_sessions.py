@@ -5,9 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from conftest import (
-    CONN_ID, CONTACT_ID, CONTACT_2_ID, begin_session, claim, complete, delivery_outcome,
+    CONTACT_2_ID,
+    CONTACT_ID,
+    begin_session,
+    claim,
+    complete,
+    delivery_outcome,
     make_message,
 )
 

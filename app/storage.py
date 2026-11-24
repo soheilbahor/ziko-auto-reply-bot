@@ -25,7 +25,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal, Self
@@ -123,7 +123,7 @@ class InvalidReplyTextError(StorageError, ValueError):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _new_uuid() -> str:
@@ -131,7 +131,7 @@ def _new_uuid() -> str:
 
 
 def _format_timestamp(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).strftime(_TIMESTAMP_FORMAT)
+    return moment.astimezone(UTC).strftime(_TIMESTAMP_FORMAT)
 
 
 def _sanitize_error(error: str | None) -> str | None:
@@ -402,9 +402,8 @@ class Database:
     @asynccontextmanager
     async def _write(self) -> AsyncIterator[aiosqlite.Connection]:
         conn = self._require_conn()
-        async with self._lock:
-            async with _begin(conn):
-                yield conn
+        async with self._lock, _begin(conn):
+            yield conn
 
     # -- app state ------------------------------------------------------------
 

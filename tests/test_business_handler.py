@@ -4,14 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 from conftest import (
-    ADMIN_ID, BOT_TOKEN, CONN_ID, CONTACT_ID, OWNER_ID, PRIVATE_BODY, STRANGER_ID,
-    ambiguous_failure, begin_session, claim, complete, confirmed_rejection,
-    delivery_outcome, dump_database_text, make_connection_update, make_message,
+    ADMIN_ID,
+    BOT_TOKEN,
+    CONN_ID,
+    CONTACT_ID,
+    OWNER_ID,
+    PRIVATE_BODY,
+    STRANGER_ID,
+    ambiguous_failure,
+    begin_session,
+    claim,
+    complete,
+    confirmed_rejection,
+    delivery_outcome,
+    dump_database_text,
+    make_connection_update,
+    make_message,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -89,10 +102,10 @@ async def test_no_reply_when_can_reply_is_false(armed: Any) -> None:
     assert armed.sent == []
 
 
-async def test_no_reply_when_no_connection_is_stored(harness: Any) -> None:
-    await begin_session(harness.db)
-    await harness.deliver(make_message(message_id=1))
-    assert harness.sent == []
+async def test_no_reply_when_no_connection_is_stored(empty_harness: Any) -> None:
+    await begin_session(empty_harness.db)
+    await empty_harness.deliver(make_message(message_id=1))
+    assert empty_harness.sent == []
 
 
 async def test_no_reply_for_unknown_connection_id(armed: Any) -> None:
@@ -115,6 +128,19 @@ async def test_connection_update_persists_enabled_and_reply_rights(harness: Any)
     stored = await harness.db.get_business_connection()
     assert (stored.connection_id, stored.is_enabled, stored.can_reply, stored.owner_user_id) == (
         CONN_ID, True, True, OWNER_ID)
+
+
+async def test_connection_update_uses_owner_chat_id_when_user_id_is_absent(
+    harness: Any,
+) -> None:
+    """A reduced update still identifies the connecting owner via user_chat_id."""
+    connection = make_connection_update(can_reply=None)
+    connection.user = SimpleNamespace(is_bot=False)
+    await harness.connection_update(connection)
+    stored = await harness.db.get_business_connection()
+    assert stored is not None
+    assert stored.owner_user_id == OWNER_ID
+    assert stored.can_reply is False
 
 
 # ----------------------------------------------------------------------------

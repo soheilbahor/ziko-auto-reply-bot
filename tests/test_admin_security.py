@@ -17,9 +17,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from conftest import (
-    ADMIN_ID, BOT_TOKEN, OWNER_ID, PROJECT_ROOT, STRANGER_ID, import_area, mismatch,
+    ADMIN_ID,
+    BOT_TOKEN,
+    OWNER_ID,
+    PROJECT_ROOT,
+    STRANGER_ID,
+    import_area,
+    mismatch,
 )
 
 LONG_TEXT = "ا" * 10_000          # far beyond Telegram's 4096-char message limit
@@ -332,7 +337,7 @@ def test_production_code_does_not_use_legacy_sent_flag_api() -> None:
     for path in require_production_sources():
         text = path.read_text(encoding="utf-8")
         for pattern in LEGACY_DELIVERY_PATTERNS:
-            for match in re.finditer(pattern, text, flags=re.S):
+            for match in re.finditer(pattern, text, flags=re.DOTALL):
                 offenders.append(f"{path.relative_to(PROJECT_ROOT)}: {match.group(0)[:60]!r}")
     assert not offenders, offenders
 

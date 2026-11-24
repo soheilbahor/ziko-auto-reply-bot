@@ -8,13 +8,14 @@ both ``python -m unittest`` and ``pytest``.
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import stat
 import tempfile
 import unittest
 import uuid
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ class FakeClock:
     """Deterministic, manually advanced UTC clock."""
 
     def __init__(self) -> None:
-        self.now = datetime(2026, 11, 24, 12, 0, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 11, 24, 12, 0, 0, tzinfo=UTC)
 
     def __call__(self) -> datetime:
         return self.now
@@ -85,6 +86,10 @@ class InitializationTests(StorageTestCase):
         self.assertEqual(self.raw_query("PRAGMA user_version")[0][0], SCHEMA_VERSION)
 
     async def test_database_file_is_owner_only(self) -> None:
+        if os.name == "nt":
+            self.skipTest(
+                "POSIX mode bits are not a reliable Windows ACL security check"
+            )
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode) & 0o077, 0)
 
     async def test_default_state_is_off(self) -> None:

@@ -59,10 +59,11 @@ import importlib
 import os
 import sqlite3
 import sys
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterable
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -202,6 +203,19 @@ def db_path(tmp_path: Path) -> Path:
 async def db(db_path: Path):
     database = make_database(db_path)
     await database.initialize()
+    # Most storage/session tests model an already-authorized Business connection.
+    await database.save_business_connection(CONN_ID, True, True, OWNER_ID)
+    try:
+        yield database
+    finally:
+        await database.close()
+
+
+@pytest_asyncio.fixture
+async def empty_db(db_path: Path):
+    """A database with no Business connection, for fail-closed engine tests."""
+    database = make_database(db_path)
+    await database.initialize()
     try:
         yield database
     finally:
@@ -298,9 +312,10 @@ def dump_database_text(path: Path) -> str:
 def settings(tmp_path: Path) -> Any:
     values = dict(
         bot_token=BOT_TOKEN,
-        admin_ids=frozenset({ADMIN_ID, OWNER_ID}),
+        admin_ids=frozenset({ADMIN_ID}),
         database_path=tmp_path / "data" / "ziko-test.db",
         log_level="DEBUG",
+        business_owner_id=OWNER_ID,
     )
     module = import_area("config")
     settings_cls = getattr(module, "Settings", None) if module else None
@@ -535,6 +550,21 @@ async def harness(db: Any, sender: AsyncMock, settings: Any) -> EngineHarness:
                            ("BusinessMessageEngine", "BusinessEngine", "BusinessHandler",
                             "create_engine", "build_engine"))
     spy = SpyDatabase(db)
+    try:
+        engine = factory(db=spy, sender=sender, settings=settings)
+    except TypeError as exc:
+        mismatch(f"engine factory rejects (db=, sender=, settings=): {exc}")
+    return EngineHarness(engine=engine, sender=sender, db=spy, settings=settings)
+
+
+
+@pytest_asyncio.fixture
+async def empty_harness(empty_db: Any, sender: AsyncMock, settings: Any) -> EngineHarness:
+    """Engine harness backed by a database that has no saved Business connection."""
+    factory = load_factory("ZIKO_ENGINE_FACTORY", "business",
+                           ("BusinessMessageEngine", "BusinessEngine", "BusinessHandler",
+                            "create_engine", "build_engine"))
+    spy = SpyDatabase(empty_db)
     try:
         engine = factory(db=spy, sender=sender, settings=settings)
     except TypeError as exc:

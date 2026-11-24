@@ -4,6 +4,8 @@ Environment variables:
     BOT_TOKEN      Telegram bot token from BotFather (required).
     ADMIN_IDS      Numeric Telegram user IDs allowed to manage the bot,
                    separated by commas, semicolons or whitespace (required).
+    BUSINESS_OWNER_ID  Numeric Telegram user ID that owns the Business connection
+                       (optional; without it, Business connections are rejected).
     DATABASE_PATH  SQLite file path (default: data/ziko.sqlite3).
     LOG_LEVEL      CRITICAL, ERROR, WARNING, INFO or DEBUG (default: INFO).
 
@@ -39,6 +41,7 @@ class Settings:
     admin_ids: frozenset[int]
     database_path: Path
     log_level: str
+    business_owner_id: int | None = None
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -80,6 +83,14 @@ def _parse_admin_ids(raw: str) -> frozenset[int]:
     return frozenset(admin_ids)
 
 
+def _parse_business_owner_id(raw: str) -> int | None:
+    value = raw.strip()
+    if not value:
+        return None
+    if not (value.isascii() and value.isdigit()) or int(value) <= 0:
+        raise ConfigError("BUSINESS_OWNER_ID must be a positive numeric Telegram user ID")
+    return int(value)
+
 def load_settings(
     environ: Mapping[str, str] | None = None,
     *,
@@ -105,6 +116,7 @@ def load_settings(
         raise ConfigError("BOT_TOKEN has an invalid format")
 
     admin_ids = _parse_admin_ids(values.get("ADMIN_IDS", ""))
+    business_owner_id = _parse_business_owner_id(values.get("BUSINESS_OWNER_ID", ""))
 
     database_path = Path(values.get("DATABASE_PATH", "").strip() or DEFAULT_DATABASE_PATH).expanduser()
 
@@ -117,4 +129,5 @@ def load_settings(
         admin_ids=admin_ids,
         database_path=database_path,
         log_level=log_level,
+        business_owner_id=business_owner_id,
     )

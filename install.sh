@@ -118,14 +118,16 @@ else
     NEW_ADMINS+="${NEW_ADMINS:+,}${idv}"
   done
   [[ -n "$NEW_ADMINS" ]] || die "ADMIN_IDS is required."
+  read -r -p "BUSINESS_OWNER_ID (numeric Telegram account ID): " NEW_OWNER_ID </dev/tty
+  [[ "$NEW_OWNER_ID" =~ ^[0-9]+$ && "$NEW_OWNER_ID" -gt 0 ]] || die "Invalid BUSINESS_OWNER_ID."
 fi
 
 install -d -o root -g "$APP_GROUP" -m 750 "$CONF_DIR"
 install -d -o "$APP_USER" -g "$APP_GROUP" -m 700 "$DATA_DIR" "$BACKUP_DIR"
 if [[ "$KEEP_CONFIG" -eq 0 ]]; then
   tmp="$(mktemp "$CONF_DIR/.ziko.env.XXXXXX")"
-  printf '# ZIKO configuration; keep private.\nBOT_TOKEN=%s\nADMIN_IDS=%s\nDATABASE_PATH=%s\nLOG_LEVEL=INFO\n' \
-    "$NEW_TOKEN" "$NEW_ADMINS" "$DB_FILE" > "$tmp"
+  printf '# ZIKO configuration; keep private.\nBOT_TOKEN=%s\nADMIN_IDS=%s\nBUSINESS_OWNER_ID=%s\nDATABASE_PATH=%s\nLOG_LEVEL=INFO\n' \
+    "$NEW_TOKEN" "$NEW_ADMINS" "$NEW_OWNER_ID" "$DB_FILE" > "$tmp"
   chown "root:$APP_GROUP" "$tmp"; chmod 640 "$tmp"; mv -- "$tmp" "$CONF_FILE"
   NEW_TOKEN=""
 else
@@ -141,6 +143,13 @@ for line in Path(sys.argv[1]).read_text().splitlines():
 if vals.get("DATABASE_PATH") != sys.argv[2]:
  raise SystemExit("Existing DATABASE_PATH must be exactly "+sys.argv[2]+"; no config was changed.")
 PY
+  if ! grep -q "^BUSINESS_OWNER_ID=" "$CONF_FILE"; then
+    read -r -p "BUSINESS_OWNER_ID (numeric Telegram account ID): " NEW_OWNER_ID </dev/tty
+    [[ "$NEW_OWNER_ID" =~ ^[0-9]+$ && "$NEW_OWNER_ID" -gt 0 ]] || die "Invalid BUSINESS_OWNER_ID."
+    printf "\nBUSINESS_OWNER_ID=%s\n" "$NEW_OWNER_ID" >> "$CONF_FILE"
+  else
+    grep -Eq "^BUSINESS_OWNER_ID=[1-9][0-9]*$" "$CONF_FILE" || die "Existing BUSINESS_OWNER_ID is invalid; fix it explicitly."
+  fi
   [[ "$(stat -c '%U:%G:%a' "$CONF_FILE")" == "root:$APP_GROUP:640" ]] || die "Existing config ownership/mode must be root:ziko 640; fix explicitly."
 fi
 

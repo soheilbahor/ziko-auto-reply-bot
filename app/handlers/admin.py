@@ -29,7 +29,6 @@ from app.keyboards.admin import (
     AdminCB,
     back_keyboard,
     cancel_edit_keyboard,
-    confirm_text_keyboard,
     edit_status_keyboard,
     main_menu_keyboard,
     persian_title,
@@ -309,59 +308,29 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
     async def msg_new_text(message: Message, state: FSMContext) -> None:
         clean, error = validate_reply_text(message.text)
         if error is not None or clean is None:
-            await message.answer(error or "⚠️ متن نامعتبر است.", reply_markup=cancel_edit_keyboard())
+            await message.answer(
+                error or "⚠️ متن نامعتبر است.",
+                reply_markup=cancel_edit_keyboard(),
+            )
             return
 
-        data = await state.get_data()
-        status = await db.get_status(str(data.get("status_key", "")))
+        # The selected key is captured when the admin presses the status button.
+        # Read it from this user's FSM context; never infer it from current app state.
+        data: dict[str, Any] = await state.get_data()
+        key = data.get("status_key")
+        status = await db.get_status(str(key or ""))
         if status is None:
             await state.clear()
             await message.answer("⚠️ وضعیت نامعتبر است. دوباره تلاش کنید.")
             await send_menu(message)
             return
 
-        await state.update_data(new_text=clean)
-        await state.set_state(EditReply.confirming)
-
-        preview, truncated = _truncate(clean, PREVIEW_LIMIT)
-        note = "\n<i>(پیش‌نمایش کوتاه‌شده؛ متن کامل ذخیره می‌شود)</i>" if truncated else ""
-        await message.answer(
-            f"آیا متن پاسخ «{_esc(persian_title(status.title))}» "
-            "با متن زیر جایگزین شود؟\n"
-            f"<blockquote>{_esc(preview)}</blockquote>{note}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=confirm_text_keyboard(),
-        )
-
-    @router.message(EditReply.confirming)
-    async def msg_while_confirming(message: Message) -> None:
-        await message.answer(
-            "لطفاً با دکمه‌های زیر «ذخیره» یا «انصراف» را انتخاب کنید.",
-            reply_markup=confirm_text_keyboard(),
-        )
-
-    @router.callback_query(AdminCB.filter(F.action == Action.SAVE), EditReply.confirming)
-    async def cb_save(callback: CallbackQuery, state: FSMContext) -> None:
-        data: dict[str, Any] = await state.get_data()
-        key = str(data.get("status_key", ""))
-        clean, error = validate_reply_text(data.get("new_text"))  # defense in depth
-        status = await db.get_status(key)
-        if error is not None or clean is None or status is None:
-            await state.clear()
-            await callback.answer("ذخیره‌سازی ممکن نیست؛ دوباره تلاش کنید.", show_alert=True)
-            await show_menu_in_callback(callback)
-            return
-
-        # Editing text never resets the session, even for the active status.
-        await db.save_status_text(key, clean)
+        # Persist the validated text immediately. Editing reply text must not create
+        # a new delivery session or alter any existing claim/delivery record.
+        await db.save_status_text(status.key, clean)
         await state.clear()
-        log_action(callback.from_user.id, "save_status_text", key)
-
-        text, markup = await build_menu()
-        await edit_callback_message(
-            callback, f"✅ متن پاسخ ذخیره شد.\n\n{text}", markup
-        )
-        await callback.answer("ذخیره شد.")
+        log_action(message.from_user.id, "save_status_text", status.key)
+        await send_menu(message, prefix="✅ متن پاسخ ذخیره شد.\n\n")
 
     # ---------------------------- connection / stats ----------------------- #
     @router.callback_query(AdminCB.filter(F.action == Action.CONNECTION))
@@ -410,7 +379,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
                 ]
                 if rows:
                     text = "📊 <b>آمار</b>\n\n" + "\n".join(rows)
-            except Exception:  # noqa: BLE001 - never leak internals to the chat
+            except Exception:
                 logger.exception("Failed to load statistics")
         await edit_callback_message(callback, text, back_keyboard())
         await callback.answer()

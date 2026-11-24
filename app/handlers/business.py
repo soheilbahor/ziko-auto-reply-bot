@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from aiogram import Bot, Router
 from aiogram.types import BusinessConnection, Message
 

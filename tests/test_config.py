@@ -50,9 +50,8 @@ class LoadSettingsTests(unittest.TestCase):
 
     def test_invalid_admin_ids(self) -> None:
         for raw in ("", "   ", "abc", "-5", "0", "12.5", "1001,abc"):
-            with self.subTest(raw=raw):
-                with self.assertRaises(ConfigError):
-                    load_settings(env(ADMIN_IDS=raw))
+            with self.subTest(raw=raw), self.assertRaises(ConfigError):
+                load_settings(env(ADMIN_IDS=raw))
 
     def test_missing_admin_ids(self) -> None:
         with self.assertRaises(ConfigError):
