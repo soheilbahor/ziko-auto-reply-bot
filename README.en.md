@@ -94,6 +94,20 @@ For a downloaded release archive, extract it and run `sudo ./install.sh`. See
 Menu names can vary slightly between Telegram versions; reference: <https://core.telegram.org/bots/api>.
 
 ## Commands and CLI
+
+The Rich CLI provides a sectioned operations dashboard. The installed version is read
+from the installation's `VERSION` marker, which is updated together with each release.
+
+Useful commands:
+
+- `ziko status` — service, database, backup and child-bot summary.
+- `ziko bots list` — list registered child bots without decrypting or displaying tokens.
+- `ziko doctor` — diagnose runtime, permissions, connectivity and version marker.
+- `ziko help` — show CLI Help & About.
+- `ziko version` — show the installed release marker.
+
+Use `/create_bot` in the master bot to create a Telegram Managed Bot (customer confirms in Telegram; ZIKO retrieves its token automatically) or connect an existing bot with `/connect_bot`. The master bot must have Bot Management Mode enabled.
+Platform administrators can use `/tenants`, `/tenant_enable BOT_ID`, and `/tenant_disable BOT_ID`.
 After installation, the `ziko` command manages the service; run `ziko --help` for all commands.
 
 
@@ -112,6 +126,17 @@ After installation, the `ziko` command manages the service; run `ziko --help` fo
 | `pytest -ra` | Run the tests |
 
 ## Updating
+
+The Update Center supports two channels:
+
+- Stable: `sudo ziko update --channel stable`
+- Dev: `sudo ziko update --channel dev` (requires a published GitHub prerelease tagged
+  `vMAJOR.MINOR.PATCH-dev.N`)
+- Check without changing files: add `--check`, for example
+  `sudo ziko update --channel stable --check`
+
+Every update verifies the published SHA-256 checksum, snapshots the current code and
+database, preserves local configuration/data/venv, and performs a service health check.
 
 ```bash
 sudo ziko update --repo soheilbahor/ziko-auto-reply-bot
@@ -165,10 +190,20 @@ CI (`.github/workflows/ci.yml`) runs on Python 3.12 with the project's real depe
 
 **No license has been chosen yet.** Until the repository owner approves one and adds a `LICENSE` file, all rights are reserved.
 
-## Multi-tenant child bots (initial implementation)
+## Multi-tenant child bots
 
-A Telegram user can register exactly one child bot by creating it with `@BotFather`, then sending its token to the master bot using `/create_bot`. ZIKO validates the token with Telegram, stores it encrypted using Fernet, and starts an isolated polling runtime. The encryption key is stored beside the registry database as `tenant-token.key` with mode `0600`; back up that key together with `tenants.sqlite3` and the `tenants/` directory. Losing the key makes stored child bot tokens unrecoverable.
+Regular Telegram users can register one child bot. The preferred flow uses official Telegram Managed Bots: the customer confirms bot creation in Telegram, then ZIKO receives the `managed_bot` update and retrieves the token with `getManagedBotToken` without asking the customer to copy it. Existing bots can still be connected with `/connect_bot` by submitting the token privately. Tokens are encrypted with Fernet and each child bot uses an isolated polling task and SQLite database. The master bot must have Bot Management Mode enabled.
 
-Each child bot has a separate SQLite database and only its owner is authorized to use its admin panel. To enable Telegram Business replies, the owner must connect that child bot under Telegram Settings → Telegram Business → Chatbots and grant reply permission. The master owner can use `/tenants`, `/tenant_disable USER_ID`, and `/tenant_enable USER_ID`.
+Platform administration:
+- `/tenants` — list registered bots and their Bot IDs.
+- `/tenant_disable BOT_ID` — stop one child bot without deleting its data.
+- `/tenant_enable BOT_ID` — re-enable one child bot.
+- `ziko bots list` — view registry metadata from the server CLI without exposing tokens.
 
-This first implementation is a single-server, single-process deployment. Large-scale or multi-server operation requires a distributed worker/supervisor design and a shared queue/database before being advertised as horizontally scalable.
+Each bot owner must connect their child bot under Telegram Settings → Telegram Business
+→ Chatbots and grant reply permission. The token encryption key is stored as
+`tenant-token.key` with mode `0600`; losing it makes stored child-bot tokens unrecoverable.
+
+The deployment remains a single-server, single-process polling architecture. It is not
+advertised as horizontally scalable. Full-platform backup/restore includes the main
+database, child-bot registry, encryption key and isolated tenant databases.

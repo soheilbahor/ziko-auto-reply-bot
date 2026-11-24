@@ -38,22 +38,25 @@ async def run() -> None:
         dp.include_router(create_master_router(
             registry=registry, manager=manager, admin_ids=settings.admin_ids
         ))
-        dp.include_router(create_admin_router(db, settings))
+        # Onboarding must precede the admin router's catch-all, while its filters
+        # deliberately let admin /start and non-onboarding /cancel reach that router.
         dp.include_router(create_tenant_router(
             registry=registry, manager=manager, master_bot_id=master_bot_id,
             admin_ids=settings.admin_ids,
         ))
+        dp.include_router(create_admin_router(db, settings))
         dp.include_router(create_business_router(db, settings))
         await manager.start_all()
         await bot.set_my_commands([
             BotCommand(command="start", description="باز کردن پنل مدیریت"),
             BotCommand(command="menu", description="نمایش منوی مدیریت"),
-            BotCommand(command="create_bot", description="ساخت ربات اختصاصی"),
+            BotCommand(command="create_bot", description="ساخت یا اتصال ربات اختصاصی"),
+            BotCommand(command="connect_bot", description="اتصال ربات موجود با توکن"),
             BotCommand(command="cancel", description="لغو عملیات جاری"),
         ])
         await dp.start_polling(
             bot,
-            allowed_updates=["message", "callback_query", "business_connection", "business_message"],
+            allowed_updates=["message", "callback_query", "business_connection", "business_message", "managed_bot"],
             close_bot_session=False,
         )
     finally:

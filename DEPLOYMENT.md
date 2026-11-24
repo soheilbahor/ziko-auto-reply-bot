@@ -86,6 +86,10 @@ active/inactive state.
 
 ## Update and rollback
 
+Use `sudo ziko update --channel stable --check` to inspect the latest stable tag before
+installing it. The Dev channel selects the newest published GitHub prerelease whose tag
+matches `vX.Y.Z-dev.N`; it is intended for testing, not production by default.
+
 The GitHub updater (`scripts/update.sh`) downloads a tagged release and verifies the asset
 against `SHA256SUMS`. Configure the real repository using `--repo OWNER/REPOSITORY` or
 `ZIKO_REPO`; placeholder values are intentionally rejected. The updater uses the same

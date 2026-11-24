@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.8
+
+- Added Telegram Managed Bots onboarding: customers can create a bot through an official Telegram confirmation link without copying a token.
+- Added managed-bot update handling and secure token retrieval through `getManagedBotToken`.
+- Added encrypted credential refresh when Telegram reports a managed-bot token update.
+- Preserved the existing private-token connection flow as a fallback.
+- Added `managed_bot` to polling updates and `/connect_bot` command.
+
+
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 versions follow [Semantic Versioning](https://semver.org/). Release tags look like `v1.0.0`.
@@ -7,7 +16,12 @@ versions follow [Semantic Versioning](https://semver.org/). Release tags look li
 ## [Unreleased]
 
 ### Added
-- Multi-tenant child-bot MVP: one child bot per Telegram user, BotFather token validation, Fernet-encrypted token registry, per-tenant SQLite databases and independent polling runtimes.
+- Redesigned the Rich CLI into a sectioned operations dashboard with live version refresh, Help & About, and child-bot inventory.
+- Added `ziko bots list`, Stable/Dev update channel selection, and non-mutating update checks.
+- Made `VERSION` the installed CLI version source and ensured fresh installs create/validate it.
+- Added full-platform backups and validated restore for the main database, child-bot registry, encryption key and isolated tenant databases.
+- Improved update-channel validation and removed duplicate unit rollback work.
+- Multi-tenant child-bot MVP: one child bot per regular user and multiple bots for platform admins, BotFather token validation, Fernet-encrypted token registry, per-tenant SQLite databases and independent polling runtimes.
 - Telegram Business support for each child bot using the existing rule/status-based reply engine.
 - Master commands to list, disable and re-enable child bots; supervised polling retries with backoff.
 - GitHub preparation: Persian `README.md`, `README.en.md`, `CHANGELOG.md`, hardened `.gitignore`.

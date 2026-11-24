@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -31,13 +32,45 @@ _known_secrets: list[str] | None = None
 
 
 # --------------------------------------------------------------------------- helpers
+_VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
+_DEV_RE = re.compile(r"^dev-([0-9A-Fa-f]{7,40})$")
+_SHA_RE = re.compile(r"^[0-9A-Fa-f]{7,40}$")
+
+
+def resolve_installed_version(home: Path | None = None) -> str:
+    """Read the installed release marker; VERSION is the runtime source of truth."""
+    base = Path(home) if home is not None else HOME
+    marker = base / "VERSION"
+    try:
+        raw = marker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        raise RuntimeError(f"VERSION file not found: {marker}") from None
+    except (OSError, UnicodeDecodeError):
+        raise RuntimeError(f"VERSION file is unreadable: {marker}") from None
+    if not raw:
+        raise RuntimeError(f"VERSION file is empty: {marker}")
+    if _VERSION_RE.fullmatch(raw):
+        return raw.removeprefix("v")
+    if _DEV_RE.fullmatch(raw):
+        return raw.lower()
+    if _SHA_RE.fullmatch(raw):
+        return raw.lower()
+    raise RuntimeError(f"Malformed VERSION value in {marker}")
+
+
 def _version() -> str:
     try:
-        from app import __version__
-
-        return __version__
-    except Exception:  # noqa: BLE001 - version must never break the CLI
+        return resolve_installed_version()
+    except RuntimeError:
         return "unknown"
+
+
+def _version_error() -> str | None:
+    try:
+        resolve_installed_version()
+    except RuntimeError as exc:
+        return str(exc)
+    return None
 
 
 def _ui():
@@ -266,7 +299,22 @@ def cmd_status() -> int:
         rows.append(("Last backup", f"{_human_duration(time.time() - mtime)} ago"))
     else:
         rows.append(("Last backup", "Permission denied" if problem == "denied" else "None"))
-    rows.append(("Version", _version()))
+    version = _version()
+    rows.append(("Version", version if version != "unknown" else "Unavailable"))
+    if version == "unknown":
+        rows.append(("Version source", _version_error() or "VERSION unavailable"))
+    tenant_path = _db_path(values).with_name("tenants.sqlite3")
+    if tenant_path.is_file():
+        try:
+            with sqlite3.connect(f"file:{tenant_path}?mode=ro", uri=True, timeout=3) as tenant_db:
+                total, enabled = tenant_db.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(enabled), 0) FROM tenants"
+                ).fetchone()
+            rows.append(("Child bots", f"{enabled} enabled / {total} registered"))
+        except sqlite3.Error:
+            rows.append(("Child bots", "Registry unavailable"))
+    else:
+        rows.append(("Child bots", "0 registered"))
     ui.render_status(rows)  # type: ignore[arg-type]
     return 0 if state == "active" else 3
 
@@ -364,14 +412,34 @@ def cmd_backup() -> int:
 
 def cmd_restore(file: str, yes: bool = False) -> int:
     ui = _ui()
-    path = Path(file).expanduser().resolve()
+    path = Path(file).expanduser().absolute()
     if not path.is_file():
         ui.error(f"Backup file not found: {path}")
         return 2
+    platform_archive = path.name.endswith(".tar.gz") or path.suffix == ".tgz"
+    if platform_archive:
+        script = _script("restore-platform.sh")
+        if not script:
+            return 1
+        ui.warn(
+            "A full platform restore replaces the main database, child-bot registry, "
+            "encryption key, and child-bot databases. A verified pre-restore snapshot "
+            "will be created first."
+        )
+        if not yes and not ui.confirm(f"Restore full platform backup {path.name}?"):
+            ui.info("Cancelled.")
+            return 1
+        command = ["bash", str(script), *( ["--yes"] if yes else []), str(path)]
+        rc = _stream(_privileged(command))
+        if rc != 0:
+            ui.error("Platform restore failed.")
+            return rc
+        ui.ok("Full platform restore completed. The original service state was preserved.")
+        return 0
     try:
         with path.open("rb") as fh:
             if fh.read(16) != _SQLITE_MAGIC:
-                ui.error("This file is not a valid SQLite database.")
+                ui.error("This file is not a valid SQLite database or platform archive.")
                 return 2
     except PermissionError:
         ui.warn("Cannot inspect the file (permission denied); the restore script will validate it.")
@@ -383,7 +451,7 @@ def cmd_restore(file: str, yes: bool = False) -> int:
     if not yes and not ui.confirm(f"Restore from {path.name}?"):
         ui.info("Cancelled.")
         return 1
-    rc = _stream(_privileged(["bash", str(script), *(["--yes"] if yes else []), str(path)]))
+    rc = _stream(_privileged(["bash", str(script), *( ["--yes"] if yes else []), str(path)]))
     if rc != 0:
         ui.error("Restore failed.")
         return rc
@@ -391,19 +459,31 @@ def cmd_restore(file: str, yes: bool = False) -> int:
     return 0 if _wait_for("active") else 1
 
 
-def cmd_update(yes: bool = False, repo: str | None = None, version: str | None = None) -> int:
+def cmd_update(
+    yes: bool = False,
+    repo: str | None = None,
+    version: str | None = None,
+    channel: str = "stable",
+    check: bool = False,
+) -> int:
     ui = _ui()
     script = _script("update.sh")
     if not script:
         return 1
-    if not yes and not ui.confirm("Update ZIKO?", default=True):
-        ui.info("Cancelled.")
-        return 1
-    command = ["bash", str(script)]
+    if channel not in {"stable", "dev"}:
+        ui.error("Update channel must be stable or dev.")
+        return 2
+    command = ["bash", str(script), "--channel", channel]
     if repo:
         command += ["--repo", repo]
     if version:
         command += ["--version", version]
+    if check:
+        command.append("--check")
+        return _inherit(_privileged(command))
+    if not yes and not ui.confirm(f"Update ZIKO from the {channel} channel?", default=True):
+        ui.info("Cancelled.")
+        return 1
     rc = _inherit(_privileged(command))
     if rc != 0:
         ui.error("Update failed.")
@@ -488,6 +568,11 @@ def run_checks() -> list[tuple[str, str, str]]:
     add("ok" if v[:2] == (3, 12) else "fail", "Python version",
         f"{v.major}.{v.minor}.{v.micro}" + ("" if v[:2] == (3, 12) else " (Python 3.12 required)"))
     add("ok" if HOME.is_dir() else "fail", "Application directory", str(HOME))
+    try:
+        installed = resolve_installed_version()
+        add("ok", "Installed version marker", installed)
+    except RuntimeError as exc:
+        add("fail", "Installed version marker", str(exc))
     venv_py = HOME / ".venv" / "bin" / "python"
     add("ok" if os.access(venv_py, os.X_OK) else "fail", "Virtual environment (venv)", str(venv_py))
 
@@ -546,7 +631,8 @@ def run_checks() -> list[tuple[str, str, str]]:
                 add("warn", "Restarts", f"{info['NRestarts']} time(s) since last start")
 
     for name, level in (("backup.sh", "fail"), ("restore.sh", "fail"),
-                        ("update.sh", "warn"), ("uninstall.sh", "warn")):
+                        ("restore-platform.sh", "warn"), ("update.sh", "warn"),
+                        ("uninstall.sh", "warn")):
         found = (_scripts_dir() / name).is_file()
         add("ok" if found else level, f"Script {name}", "Present" if found else "Not found")
 
@@ -572,6 +658,35 @@ def run_checks() -> list[tuple[str, str, str]]:
     return checks
 
 
+def cmd_bots_list() -> int:
+    """List registered child bots without reading or decrypting their tokens."""
+    ui = _ui()
+    values, problem = _read_env()
+    if problem is not None:
+        ui.error("Cannot read configuration; run with sudo.")
+        return 1
+    registry_path = _db_path(values).with_name("tenants.sqlite3")
+    if not registry_path.is_file():
+        ui.info("No child-bot registry exists yet.")
+        return 0
+    try:
+        connection = sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = connection.execute(
+                "SELECT user_id, bot_id, username, enabled, created_at "
+                "FROM tenants ORDER BY created_at, bot_id"
+            ).fetchall()
+        finally:
+            connection.close()
+    except (sqlite3.Error, OSError):
+        ui.error("Could not read the child-bot registry.")
+        return 1
+    ui.render_bot_list(rows)
+    ui.info("Create bots with /create_bot in the master Telegram bot.")
+    ui.info("Platform administrators: /tenants, /tenant_enable BOT_ID, /tenant_disable BOT_ID.")
+    return 0
+
+
 def cmd_doctor() -> int:
     ui = _ui()
     with ui.console.status("Running diagnostics..."):
@@ -586,8 +701,30 @@ def cmd_version() -> int:
     except SystemExit:
         print(f"ZIKO {_version()}")
         return 0
-    ui.print_logo(_version())
+    current = _version()
+    ui.print_logo(current, version_error=_version_error())
     ui.console.print(f"Python {sys.version.split()[0]}  ·  {HOME}")
+    return 0 if current != "unknown" else 1
+
+
+def cmd_help() -> int:
+    ui = _ui()
+    ui.render_help_about(
+        version=_version(),
+        version_error=_version_error(),
+        commands=[
+            ("status", "Show service health and installation details"),
+            ("bots list", "List registered child bots without exposing tokens"),
+            ("start / stop / restart", "Control the main ZIKO service"),
+            ("logs", "View service logs with token redaction"),
+            ("backup / restore", "Create or restore a verified platform backup"),
+            ("update", "Check or install Stable / Dev releases"),
+            ("config", "Inspect or safely edit configuration"),
+            ("doctor", "Run installation diagnostics"),
+            ("version", "Show the installed release marker"),
+            ("uninstall", "Remove ZIKO after explicit confirmation"),
+        ],
+    )
     return 0
 
 
@@ -610,9 +747,15 @@ def _build_parser() -> argparse.ArgumentParser:
     upd.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     upd.add_argument("--repo", help="GitHub repository in OWNER/REPOSITORY format")
     upd.add_argument("--version", help="Release tag, e.g. v1.2.3")
+    upd.add_argument("--channel", choices=("stable", "dev"), default="stable",
+                     help="Release channel (default: stable)")
+    upd.add_argument("--check", action="store_true", help="Check the selected channel without updating")
+    bots = sub.add_parser("bots", help="List and inspect registered child bots")
+    bots_sub = bots.add_subparsers(dest="bots_command")
+    bots_sub.add_parser("list", help="List registered child bots (tokens are never shown)")
     sub.add_parser("backup", help="Back up the database (scripts/backup.sh)")
     res = sub.add_parser("restore", help="Restore from a backup file (scripts/restore.sh)")
-    res.add_argument("file", metavar="FILE", help="Path to the .sqlite3 backup file")
+    res.add_argument("file", metavar="FILE", help="Path to a .sqlite3 backup or full-platform .tar.gz archive")
     res.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     cfg = sub.add_parser("config", help="Show configuration (the token is never displayed)")
     cfg.add_argument("--edit", action="store_true", help="Edit the .env file")
@@ -636,13 +779,28 @@ def _interactive() -> int:
             return cmd_config(edit=True)
         return rc
 
+    def update_center() -> int:
+        channel = (ui.ask("Update channel (stable/dev) [stable]") or "stable").strip().lower()
+        if channel not in {"stable", "dev"}:
+            ui.error("Choose either stable or dev.")
+            return 2
+        ui.info(f"Checking the {channel} channel before making changes...")
+        rc = cmd_update(channel=channel, check=True)
+        if rc != 0:
+            return rc
+        if not ui.confirm(f"Install the available {channel} release?", default=True):
+            ui.info("Update cancelled; no files were changed.")
+            return 0
+        return cmd_update(yes=True, channel=channel)
+
     actions = {
         "status": cmd_status, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
         "logs": lambda: cmd_logs(50, follow=True), "backup": cmd_backup, "restore": restore,
-        "update": cmd_update, "config": config, "doctor": cmd_doctor,
-        "version": cmd_version, "uninstall": cmd_uninstall,
+        "update": update_center, "config": config, "doctor": cmd_doctor,
+        "version": cmd_version, "help": cmd_help, "bots": cmd_bots_list,
+        "uninstall": cmd_uninstall,
     }
-    return ui.run_menu(actions, service_state, _version())
+    return ui.run_menu(actions, service_state, version=_version, version_error_fn=_version_error)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -664,7 +822,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if c == "config":
             return cmd_config(args.edit)
         if c == "update":
-            return cmd_update(args.yes, args.repo, args.version)
+            return cmd_update(args.yes, args.repo, args.version, args.channel, args.check)
+        if c == "bots":
+            if args.bots_command not in {None, "list"}:
+                parser.error("unsupported bots command")
+            return cmd_bots_list()
         if c == "uninstall":
             return cmd_uninstall(args.yes)
         return {"status": cmd_status, "start": cmd_start, "stop": cmd_stop,

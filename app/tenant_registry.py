@@ -1,7 +1,7 @@
 """Encrypted registry for user-owned ZIKO child bots.
 
-Each Telegram user may register exactly one child bot. Bot tokens are encrypted
-with a local Fernet key stored separately with owner-only permissions.
+Regular Telegram users may register one child bot; platform administrators may
+register multiple child bots. Tokens are encrypted with a local Fernet key.
 """
 from __future__ import annotations
 
@@ -63,7 +63,8 @@ class TenantRegistry:
         await conn.execute("PRAGMA busy_timeout=5000")
         await conn.execute(
             """CREATE TABLE IF NOT EXISTS tenants (
-                user_id INTEGER PRIMARY KEY CHECK(user_id > 0),
+                tenant_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL CHECK(user_id > 0),
                 bot_id INTEGER NOT NULL UNIQUE CHECK(bot_id > 0),
                 username TEXT NOT NULL,
                 encrypted_token TEXT NOT NULL,
@@ -71,6 +72,37 @@ class TenantRegistry:
                 created_at TEXT NOT NULL
             )"""
         )
+        # Migrate the original one-bot-per-user schema without losing any row.
+        async with conn.execute("PRAGMA table_info(tenants)") as cur:
+            columns = await cur.fetchall()
+        user_id_is_primary = any(row["name"] == "user_id" and int(row["pk"]) > 0 for row in columns)
+        if user_id_is_primary:
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                await conn.execute(
+                    """CREATE TABLE tenants_v2 (
+                        tenant_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL CHECK(user_id > 0),
+                        bot_id INTEGER NOT NULL UNIQUE CHECK(bot_id > 0),
+                        username TEXT NOT NULL,
+                        encrypted_token TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+                        created_at TEXT NOT NULL
+                    )"""
+                )
+                await conn.execute(
+                    """INSERT INTO tenants_v2
+                       (user_id, bot_id, username, encrypted_token, enabled, created_at)
+                       SELECT user_id, bot_id, username, encrypted_token, enabled, created_at
+                       FROM tenants ORDER BY created_at"""
+                )
+                await conn.execute("DROP TABLE tenants")
+                await conn.execute("ALTER TABLE tenants_v2 RENAME TO tenants")
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_tenants_user_id ON tenants(user_id)")
         await conn.commit()
         self._conn = conn
 
@@ -96,16 +128,20 @@ class TenantRegistry:
             raise TenantRegistryError("Tenant registry is not initialized")
         return self._conn
 
-    async def add_tenant(self, *, user_id: int, bot_id: int, username: str, token: str) -> Tenant:
+    async def add_tenant(
+        self, *, user_id: int, bot_id: int, username: str, token: str,
+        allow_multiple: bool = False,
+    ) -> Tenant:
         conn = self._require_conn()
         assert self._fernet is not None
         encrypted = self._fernet.encrypt(token.encode("utf-8")).decode("ascii")
         async with self._lock:
             await conn.execute("BEGIN IMMEDIATE")
             try:
-                async with conn.execute("SELECT 1 FROM tenants WHERE user_id=?", (user_id,)) as cur:
-                    if await cur.fetchone():
-                        raise UserAlreadyHasBot("This user already has a registered bot")
+                if not allow_multiple:
+                    async with conn.execute("SELECT 1 FROM tenants WHERE user_id=? LIMIT 1", (user_id,)) as cur:
+                        if await cur.fetchone():
+                            raise UserAlreadyHasBot("This user already has a registered bot")
                 try:
                     await conn.execute(
                         "INSERT INTO tenants(user_id,bot_id,username,encrypted_token,created_at) "
@@ -134,26 +170,91 @@ class TenantRegistry:
             created_at=str(row["created_at"]), enabled=bool(row["enabled"]), bot_token=token,
         )
 
+    async def update_tenant_credentials(
+        self, *, user_id: int, bot_id: int, username: str, token: str
+    ) -> Tenant | None:
+        """Update a managed bot token after Telegram reports a token/owner update.
+
+        The existing owner binding is immutable here: ownership changes require
+        an explicit administrative transfer workflow.
+        """
+        conn = self._require_conn()
+        assert self._fernet is not None
+        encrypted = self._fernet.encrypt(token.encode("utf-8")).decode("ascii")
+        async with self._lock:
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    "SELECT * FROM tenants WHERE bot_id=?", (bot_id,)
+                ) as cur:
+                    row = await cur.fetchone()
+                if row is None or int(row["user_id"]) != user_id:
+                    await conn.rollback()
+                    return None
+                await conn.execute(
+                    "UPDATE tenants SET username=?, encrypted_token=? WHERE bot_id=? AND user_id=?",
+                    (username, encrypted, bot_id, user_id),
+                )
+                async with conn.execute(
+                    "SELECT * FROM tenants WHERE bot_id=?", (bot_id,)
+                ) as cur:
+                    updated = await cur.fetchone()
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return self._tenant(updated, reveal_token=True) if updated else None
+
     async def get_tenant(self, user_id: int, *, reveal_token: bool = False) -> Tenant | None:
+        """Return the oldest registered bot for a user (legacy one-bot API)."""
         conn = self._require_conn()
         async with self._lock:
-            async with conn.execute("SELECT * FROM tenants WHERE user_id=?", (user_id,)) as cur:
+            async with conn.execute(
+                "SELECT * FROM tenants WHERE user_id=? ORDER BY tenant_id ASC LIMIT 1",
+                (user_id,),
+            ) as cur:
                 row = await cur.fetchone()
         return self._tenant(row, reveal_token=reveal_token) if row else None
 
-    async def list_tenants(self, *, reveal_tokens: bool = False) -> list[Tenant]:
+    async def get_tenant_by_bot_id(self, bot_id: int, *, reveal_token: bool = False) -> Tenant | None:
         conn = self._require_conn()
         async with self._lock:
-            async with conn.execute("SELECT * FROM tenants ORDER BY created_at") as cur:
+            async with conn.execute("SELECT * FROM tenants WHERE bot_id=?", (bot_id,)) as cur:
+                row = await cur.fetchone()
+        return self._tenant(row, reveal_token=reveal_token) if row else None
+
+    async def list_tenants(
+        self, *, reveal_tokens: bool = False, user_id: int | None = None
+    ) -> list[Tenant]:
+        conn = self._require_conn()
+        async with self._lock:
+            if user_id is None:
+                query = "SELECT * FROM tenants ORDER BY tenant_id ASC"
+                params: tuple[object, ...] = ()
+            else:
+                query = "SELECT * FROM tenants WHERE user_id=? ORDER BY tenant_id ASC"
+                params = (user_id,)
+            async with conn.execute(query, params) as cur:
                 rows = await cur.fetchall()
         return [self._tenant(row, reveal_token=reveal_tokens) for row in rows]
 
 
     async def set_enabled(self, user_id: int, enabled: bool) -> bool:
+        """Compatibility method: enable/disable every bot owned by a user."""
         conn = self._require_conn()
         async with self._lock:
             async with conn.execute(
                 "UPDATE tenants SET enabled=? WHERE user_id=?", (int(enabled), user_id)
+            ) as cur:
+                changed = cur.rowcount > 0
+            await conn.commit()
+        return changed
+
+    async def set_tenant_enabled(self, bot_id: int, enabled: bool) -> bool:
+        conn = self._require_conn()
+        async with self._lock:
+            async with conn.execute(
+                "UPDATE tenants SET enabled=? WHERE bot_id=?", (int(enabled), bot_id)
             ) as cur:
                 changed = cur.rowcount > 0
             await conn.commit()

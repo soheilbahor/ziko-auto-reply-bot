@@ -45,6 +45,17 @@ jobs:
             echo "::error::Files under data/ must not be tracked"; exit 1
           fi
 
+      - name: Verify version sources
+        run: |
+          python - <<'PYCODE'
+          import tomllib
+          from pathlib import Path
+          import app
+          package_version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          marker_version = Path("VERSION").read_text().strip().removeprefix("v")
+          assert app.__version__ == package_version == marker_version, (app.__version__, package_version, marker_version)
+          PYCODE
+
       - name: Compile
         run: python -m compileall -q app tests
 

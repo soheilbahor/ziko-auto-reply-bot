@@ -6,11 +6,13 @@
 # Usage (as root):
 #   sudo scripts/update.sh                       # latest release
 #   sudo scripts/update.sh --version v1.2.0      # specific release
+#   sudo scripts/update.sh --channel stable      # latest stable (default)
+#   sudo scripts/update.sh --channel dev         # latest published -dev prerelease
+#   sudo scripts/update.sh --check               # only report selected channel versions
 #   sudo scripts/update.sh --repo OWNER/REPOSITORY
-#   sudo scripts/update.sh --check               # only report versions
 #
 # Environment overrides: ZIKO_REPO, ZIKO_SERVICE, ZIKO_USER, ZIKO_ROOT,
-# ZIKO_HEALTH_SECONDS, ZIKO_KEEP_CODE_SNAPSHOTS, ZIKO_BASE_URL.
+# ZIKO_HEALTH_SECONDS, ZIKO_KEEP_CODE_SNAPSHOTS, ZIKO_BASE_URL, ZIKO_API_URL.
 set -Eeuo pipefail
 umask 077
 
@@ -26,11 +28,13 @@ ASSET_PREFIX="ziko-assistant"
 PRESERVE=(.env data .venv backups)
 
 TAG=""
+CHANNEL="stable"
 CHECK_ONLY=0
 WORK=""
 BACKUP_DIR="${ZIKO_BACKUP_DIR:-/var/backups/ziko-assistant}"
 DB_PATH="${ZIKO_DB_PATH:-/var/lib/ziko-assistant/ziko.sqlite3}"
 DB_BACKUP=""
+PLATFORM_BACKUP=""
 CODE_SNAPSHOT=""
 UNIT_FILE="/etc/systemd/system/ziko.service"
 UNIT_SNAPSHOT=""
@@ -113,11 +117,18 @@ rollback() {
     install -o root -g root -m 644 "$UNIT_SNAPSHOT" "$UNIT_FILE" || warn "systemd unit rollback failed"
     systemctl daemon-reload || warn "systemd daemon-reload failed during rollback"
   fi
-  if [[ "$HAD_UNIT" -eq 1 && -f "$UNIT_SNAPSHOT" ]]; then
-    install -o root -g root -m 644 "$UNIT_SNAPSHOT" "$UNIT_FILE" || warn "systemd unit rollback failed"
-    systemctl daemon-reload || warn "systemd daemon-reload failed during rollback"
+  local platform_restored=0
+  if [[ "$STARTED_NEW" -eq 1 && -n "$PLATFORM_BACKUP" && -f "$PLATFORM_BACKUP" \
+        && -f "$WORK/stage/scripts/restore-platform.sh" ]]; then
+    if ZIKO_APP_DIR="$ROOT" ZIKO_ENV_FILE="${ZIKO_ENV_FILE:-/etc/ziko-assistant/ziko.env}" \
+      ZIKO_DB_PATH="$DB_PATH" ZIKO_BACKUP_DIR="$BACKUP_DIR" \
+      bash "$WORK/stage/scripts/restore-platform.sh" --yes "$PLATFORM_BACKUP"; then
+      platform_restored=1
+    else
+      warn "full platform rollback failed; inspect $BACKUP_DIR"
+    fi
   fi
-  if [[ "$STARTED_NEW" -eq 1 && -n "$DB_BACKUP" && -f "$DB_BACKUP" ]]; then
+  if [[ "$STARTED_NEW" -eq 1 && "$platform_restored" -eq 0 && -n "$DB_BACKUP" && -f "$DB_BACKUP" ]]; then
     local db="$DB_PATH"
     rm -f -- "$db-wal" "$db-shm"
     install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$(dirname "$db")"
@@ -150,10 +161,29 @@ curl_get() {
 }
 
 resolve_latest_tag() {
-  local url
-  url="$(curl_get -I -o /dev/null -w '%{url_effective}' "$BASE_URL/$REPO/releases/latest")" \
-    || die "cannot resolve the latest release of $REPO"
-  printf '%s' "${url##*/}"
+  if [[ "$CHANNEL" == "stable" ]]; then
+    local url
+    url="$(curl_get -I -o /dev/null -w '%{url_effective}' "$BASE_URL/$REPO/releases/latest")" \
+      || die "cannot resolve the latest stable release of $REPO"
+    printf '%s' "${url##*/}"
+    return
+  fi
+  local api_url="${ZIKO_API_URL:-https://api.github.com}"
+  curl_get -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$api_url/repos/$REPO/releases?per_page=100" -o "$WORK/releases.json" \
+    || die "cannot query GitHub releases for the dev channel"
+  python3 - "$WORK/releases.json" <<'PYCODE'
+import json, re, sys
+releases = json.load(open(sys.argv[1], encoding="utf-8"))
+pattern = re.compile(r"^v\d+\.\d+\.\d+-dev(?:[.-][0-9A-Za-z.-]+)?$")
+for release in releases:
+    tag = release.get("tag_name", "")
+    if release.get("prerelease") and pattern.fullmatch(tag) and not release.get("draft"):
+        print(tag)
+        raise SystemExit(0)
+raise SystemExit("No published Dev prerelease found. Publish a vX.Y.Z-dev.N prerelease first.")
+PYCODE
 }
 
 main() {
@@ -161,6 +191,7 @@ main() {
     case "$1" in
       --version) [[ $# -ge 2 ]] || die "--version needs a value"; TAG="$2"; shift 2 ;;
       --repo)    [[ $# -ge 2 ]] || die "--repo needs a value"; REPO="$2"; shift 2 ;;
+      --channel) [[ $# -ge 2 ]] || die "--channel needs a value"; CHANNEL="$2"; shift 2 ;;
       --check)   CHECK_ONLY=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1 (see --help)" ;;
@@ -169,6 +200,7 @@ main() {
 
   [[ "$EUID" -eq 0 ]] || die "run as root (sudo)"
   [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "invalid repository: $REPO"
+  [[ "$CHANNEL" == "stable" || "$CHANNEL" == "dev" ]] || die "channel must be stable or dev"
   [[ "$REPO" != "OWNER/REPOSITORY" ]] \
     || die "set the real repository: --repo <owner>/<repo> or ZIKO_REPO"
   local cmd
@@ -185,16 +217,20 @@ main() {
   exec 9>"/run/lock/ziko-update.lock"
   flock -n 9 || die "another update is running"
 
-  [[ -n "$TAG" ]] || TAG="$(resolve_latest_tag)"
-  [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "invalid version tag: $TAG"
-  local current="unknown"
-  [[ -f "$ROOT/VERSION" ]] && current="$(tr -d '[:space:]' < "$ROOT/VERSION")"
-  log "installed: $current   target: $TAG"
-  if [[ "$CHECK_ONLY" -eq 1 ]]; then exit 0; fi
-  if [[ "$current" == "$TAG" ]]; then log "already up to date"; exit 0; fi
-
   WORK="$(mktemp -d)"
   trap cleanup EXIT
+  [[ -n "$TAG" ]] || TAG="$(resolve_latest_tag)"
+  [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "invalid version tag: $TAG"
+  if [[ "$CHANNEL" == "stable" && "$TAG" == *-* ]]; then die "stable channel cannot install a prerelease tag"; fi
+  if [[ "$CHANNEL" == "dev" && "$TAG" != *-dev* ]]; then die "dev channel requires a -dev prerelease tag"; fi
+  local current="unknown"
+  [[ -f "$ROOT/VERSION" ]] && current="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+  current="${current#v}"
+  local target_version="${TAG#v}"
+  log "installed: $current   target: $target_version   channel: $CHANNEL"
+  if [[ "$CHECK_ONLY" -eq 1 ]]; then exit 0; fi
+  if [[ "$current" == "$target_version" ]]; then log "already up to date"; exit 0; fi
+
   local asset="$ASSET_PREFIX-$TAG.tar.gz"
   local rel_url="$BASE_URL/$REPO/releases/download/$TAG"
 
@@ -214,7 +250,7 @@ main() {
   mkdir "$WORK/stage"
   tar -xzf "$WORK/$asset" -C "$WORK/stage" --strip-components=1
   local f
-  for f in app/main.py requirements.txt scripts/update.sh; do
+  for f in app/main.py requirements.txt scripts/update.sh scripts/backup.sh scripts/restore-platform.sh; do
     [[ -f "$WORK/stage/$f" ]] || die "release is missing $f"
   done
   if [[ -n "$(find "$WORK/stage" \( -name '.env' -o -name '*.sqlite*' -o -name '*.db' \) -print -quit)" ]]; then
@@ -228,6 +264,24 @@ main() {
 
   local stamp; stamp="$(date -u +%Y%m%dT%H%M%S)-$$)"
   install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$BACKUP_DIR" "$(dirname "$DB_PATH")"
+
+  if [[ -f "$ROOT/scripts/backup.sh" && -f "$ROOT/scripts/restore-platform.sh" ]]; then
+    log "creating verified full-platform pre-update backup"
+    local backup_output
+    backup_output="$(run_as_service_user env ZIKO_APP_DIR="$ROOT" \
+      ZIKO_ENV_FILE="${ZIKO_ENV_FILE:-/etc/ziko-assistant/ziko.env}" \
+      ZIKO_DB_PATH="$DB_PATH" ZIKO_BACKUP_DIR="$BACKUP_DIR" \
+      bash "$ROOT/scripts/backup.sh" "$BACKUP_DIR")" \
+      || die "full-platform pre-update backup failed; update cancelled"
+    printf '%s\n' "$backup_output"
+    PLATFORM_BACKUP="$(printf '%s\n' "$backup_output" | \
+      sed -n 's/^Full platform backup created and verified: //p' | tail -n1)"
+    [[ -n "$PLATFORM_BACKUP" && -f "$PLATFORM_BACKUP.sha256" ]] \
+      || die "full-platform backup was not published; update cancelled"
+    log "full-platform backup: $PLATFORM_BACKUP"
+  else
+    warn "full-platform backup scripts are not installed; only the main database snapshot will be available for rollback"
+  fi
 
   log "stopping $SERVICE"
   systemctl stop "$SERVICE"

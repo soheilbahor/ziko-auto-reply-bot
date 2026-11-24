@@ -73,7 +73,7 @@ for arg in "$@"; do
 done
 [[ $EUID -eq 0 ]] || die "Run as root."
 [[ -r /dev/tty ]] || die "Interactive terminal required for secure token/config confirmation."
-for f in app/main.py app/storage.py requirements.txt pyproject.toml deploy/ziko.service scripts/backup.sh scripts/restore.sh; do
+for f in app/main.py app/storage.py requirements.txt pyproject.toml deploy/ziko.service scripts/backup.sh scripts/restore.sh scripts/restore-platform.sh; do
   [[ -f "$SRC/$f" ]] || die "Missing project file: $f"
 done
 . /etc/os-release
@@ -166,6 +166,20 @@ import sys,tomllib
 p=tomllib.load(open(sys.argv[1],"rb"))
 assert p["project"]["scripts"].get("ziko") == "app.cli:main"
 PY
+if [[ ! -s "$STAGE/VERSION" ]]; then
+  python3.12 - "$STAGE/pyproject.toml" "$STAGE/VERSION" <<'PYCODE'
+import sys, tomllib
+from pathlib import Path
+version = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["project"]["version"]
+Path(sys.argv[2]).write_text(version + "\n", encoding="utf-8")
+PYCODE
+fi
+python3.12 - "$STAGE/VERSION" <<'PYCODE'
+import re,sys
+value=open(sys.argv[1],encoding="utf-8").read().strip()
+if not re.fullmatch(r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", value):
+    raise SystemExit("VERSION marker is missing or malformed")
+PYCODE
 python3.12 -m venv "$STAGE/.venv"
 "$STAGE/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
 "$STAGE/.venv/bin/python" -m pip install --disable-pip-version-check -r "$STAGE/requirements.txt"

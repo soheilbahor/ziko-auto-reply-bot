@@ -29,9 +29,12 @@ def create_master_router(*, registry: TenantRegistry, manager: TenantBotManager,
         if not items:
             await message.answer("هنوز هیچ ربات زیرمجموعه‌ای ثبت نشده است.")
             return
-        lines = [f"کاربران و ربات‌های ثبت‌شده: {len(items)}", ""]
+        lines = [f"ربات‌های ثبت‌شده: {len(items)}", ""]
         for item in items[:100]:
-            lines.append(f"• {item.user_id} — @{item.username} — {'فعال' if item.enabled else 'غیرفعال'}")
+            state = "فعال" if item.enabled else "غیرفعال"
+            lines.append(
+                f"• @{item.username} — Bot ID: {item.bot_id} — Owner: {item.user_id} — {state}"
+            )
         if len(items) > 100:
             lines.append(f"\nو {len(items) - 100} مورد دیگر...")
         await message.answer("\n".join(lines))
@@ -40,28 +43,31 @@ def create_master_router(*, registry: TenantRegistry, manager: TenantBotManager,
     async def tenant_disable(message: Message) -> None:
         parts = (message.text or "").split(maxsplit=1)
         if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit():
-            await message.answer("استفاده: /tenant_disable شناسه_تلگرام_کاربر")
+            await message.answer("استفاده: /tenant_disable BOT_ID")
             return
-        user_id = int(parts[1])
-        if not await registry.set_enabled(user_id, False):
-            await message.answer("کاربری با این شناسه ثبت نشده است.")
+        bot_id = int(parts[1])
+        tenant = await registry.get_tenant_by_bot_id(bot_id)
+        if tenant is None or not await registry.set_tenant_enabled(bot_id, False):
+            await message.answer("رباتی با این شناسه ثبت نشده است.")
             return
-        await manager.stop_tenant(user_id)
-        await message.answer(f"ربات زیرمجموعه کاربر {user_id} غیرفعال شد.")
+        await manager.stop_tenant(bot_id)
+        await message.answer(f"ربات @{tenant.username} (شناسه {bot_id}) غیرفعال شد.")
 
     @router.message(Command("tenant_enable"))
     async def tenant_enable(message: Message) -> None:
         parts = (message.text or "").split(maxsplit=1)
         if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit():
-            await message.answer("استفاده: /tenant_enable شناسه_تلگرام_کاربر")
+            await message.answer("استفاده: /tenant_enable BOT_ID")
             return
-        user_id = int(parts[1])
-        if not await registry.set_enabled(user_id, True):
-            await message.answer("کاربری با این شناسه ثبت نشده است.")
+        bot_id = int(parts[1])
+        if not await registry.set_tenant_enabled(bot_id, True):
+            await message.answer("رباتی با این شناسه ثبت نشده است.")
             return
-        tenant = await registry.get_tenant(user_id, reveal_token=True)
-        if tenant is not None:
-            await manager.start_tenant(tenant)
-        await message.answer(f"ربات زیرمجموعه کاربر {user_id} فعال شد.")
+        tenant = await registry.get_tenant_by_bot_id(bot_id, reveal_token=True)
+        if tenant is None:
+            await message.answer("اطلاعات ربات پیدا نشد؛ وضعیت را دوباره بررسی کنید.")
+            return
+        await manager.start_tenant(tenant)
+        await message.answer(f"ربات @{tenant.username} (شناسه {bot_id}) فعال شد.")
 
     return router

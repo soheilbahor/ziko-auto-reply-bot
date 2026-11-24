@@ -24,7 +24,7 @@ class TenantBotManager:
     def __init__(self, *, settings: Any, registry: TenantRegistry) -> None:
         self.settings = settings
         self.registry = registry
-        self._tasks: dict[int, asyncio.Task[None]] = {}
+        self._tasks: dict[int, asyncio.Task[None]] = {}  # keyed by Telegram bot_id
 
     @property
     def tenant_db_dir(self) -> Path:
@@ -38,14 +38,16 @@ class TenantBotManager:
     async def start_tenant(self, tenant: Tenant) -> None:
         if not tenant.enabled:
             return
-        current = self._tasks.get(tenant.user_id)
+        current = self._tasks.get(tenant.bot_id)
         if current is not None and not current.done():
             return
-        task = asyncio.create_task(self._supervise_tenant(tenant), name=f"ziko-tenant-{tenant.user_id}")
-        self._tasks[tenant.user_id] = task
+        task = asyncio.create_task(
+            self._supervise_tenant(tenant), name=f"ziko-tenant-{tenant.bot_id}"
+        )
+        self._tasks[tenant.bot_id] = task
 
-    async def stop_tenant(self, user_id: int) -> None:
-        task = self._tasks.pop(user_id, None)
+    async def stop_tenant(self, bot_id: int) -> None:
+        task = self._tasks.pop(bot_id, None)
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -65,9 +67,17 @@ class TenantBotManager:
 
     async def _run_tenant_once(self, tenant: Tenant) -> None:
         bot = Bot(token=tenant.bot_token)
-        db_path = self.tenant_db_dir / f"{tenant.user_id}.sqlite3"
         self.tenant_db_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.tenant_db_dir, 0o700)
+        # Keep the original owner's database path for their oldest registered bot.
+        # This is intentionally non-destructive so rollback to the previous release
+        # can still find existing per-user databases.
+        legacy_path = self.tenant_db_dir / f"{tenant.user_id}.sqlite3"
+        primary = await self.registry.get_tenant(tenant.user_id)
+        if primary is not None and primary.bot_id == tenant.bot_id and legacy_path.is_file():
+            db_path = legacy_path
+        else:
+            db_path = self.tenant_db_dir / f"bot-{tenant.bot_id}.sqlite3"
         db = Database(db_path)
         tenant_settings = replace(
             self.settings,

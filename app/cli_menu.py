@@ -6,6 +6,7 @@ reads configuration, so it cannot leak secrets by itself.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import re
 
 from rich import box
 from rich.console import Console
@@ -53,18 +54,25 @@ _STATES = {
 _LEVELS = {"ok": ("✔", "ok"), "warn": ("!", "warn"), "fail": ("✘", "err")}
 
 MENU_ITEMS: Sequence[tuple[str, str, str]] = (
-    ("1", "Service status", "status"),
-    ("2", "Start service", "start"),
-    ("3", "Stop service", "stop"),
-    ("4", "Restart service", "restart"),
-    ("5", "View logs", "logs"),
-    ("6", "Backup", "backup"),
-    ("7", "Restore backup", "restore"),
-    ("8", "Update", "update"),
-    ("9", "Configuration", "config"),
-    ("10", "Diagnostics (doctor)", "doctor"),
-    ("11", "Version", "version"),
-    ("12", "Uninstall ZIKO", "uninstall"),
+    ("1", "Dashboard / service status", "status"),
+    ("2", "List registered child bots", "bots"),
+    ("3", "Start service", "start"),
+    ("4", "Stop service", "stop"),
+    ("5", "Restart service", "restart"),
+    ("6", "View logs", "logs"),
+    ("7", "Create database backup", "backup"),
+    ("8", "Restore database backup", "restore"),
+    ("9", "Update Center", "update"),
+    ("10", "Configuration", "config"),
+    ("11", "Diagnostics", "doctor"),
+    ("12", "Help & About", "help"),
+    ("13", "Uninstall ZIKO", "uninstall"),
+)
+MENU_SECTIONS: Sequence[tuple[str, tuple[str, ...]]] = (
+    ("OVERVIEW", ("status", "bots")),
+    ("SERVICE CONTROL", ("start", "stop", "restart", "logs")),
+    ("DATA & MAINTENANCE", ("backup", "restore", "update", "config", "doctor")),
+    ("INFORMATION", ("help", "uninstall")),
 )
 
 
@@ -73,10 +81,24 @@ def _lerp(t: float) -> str:
     return f"rgb({r},{g},{b})"
 
 
+def _format_version_badge(version: str) -> str:
+    value = version.strip()
+    if not value:
+        return ""
+    if re.fullmatch(r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", value):
+        return f"v{value.removeprefix('v')}"
+    if re.fullmatch(r"dev-[0-9A-Za-z.-]+", value):
+        return value
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", value):
+        return f"commit {value.lower()}"
+    return value
+
+
 def logo(version: str = "") -> Text:
-    """Cyan -> violet gradient logo (plain text on non-UTF-8 terminals)."""
+    """Cyan-to-violet logo with a normalized version badge."""
+    badge = _format_version_badge(version)
     if console.options.ascii_only:
-        return Text(f"ZIKO {version}".strip(), style="bold cyan")
+        return Text(" ".join(part for part in ("ZIKO", badge) if part), style="bold cyan")
     rows = ["  ".join(_GLYPHS[ch][i] for ch in "ZIKO") for i in range(5)]
     width = max(len(r) for r in rows)
     text = Text()
@@ -85,15 +107,50 @@ def logo(version: str = "") -> Text:
             text.append(ch, style=_lerp(x / (width - 1)) if ch != " " else None)
         text.append("\n")
     text.append(_TAGLINE, style="cyan")
-    if version:
+    if badge:
         text.append("  ·  ", style="muted")
-        text.append(f"v{version}", style="accent")
+        text.append(badge, style="accent")
     return text
 
 
-def print_logo(version: str = "") -> None:
+def print_logo(version: str = "", version_error: str | None = None) -> None:
     console.print(logo(version))
+    if version_error:
+        err_console.print(Text.assemble(("Version unavailable: ", "err"), version_error))
     console.print()
+
+
+def render_help_about(
+    *, version: str, version_error: str | None,
+    commands: Sequence[tuple[str, str]],
+) -> None:
+    rows: list[tuple[str, str | Text]] = [
+        ("Product", "ZIKO Telegram Assistant Platform"),
+        ("Version", _format_version_badge(version) or "Unavailable"),
+        ("Runtime", "Python application managed by systemd"),
+    ]
+    if version_error:
+        rows.append(("Version source", version_error))
+    console.print(_grid("About ZIKO", rows, style="#8b5cf6"))
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan")
+    table.add_column("Command")
+    table.add_column("Description", overflow="fold")
+    for command, description in commands:
+        table.add_row(command, description)
+    console.print(Panel(table, title="CLI Help", border_style="cyan"))
+
+
+def render_bot_list(rows: Sequence[tuple[object, ...]]) -> None:
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan")
+    table.add_column("Owner ID", justify="right")
+    table.add_column("Bot ID", justify="right")
+    table.add_column("Username")
+    table.add_column("Registry")
+    table.add_column("Created")
+    for user_id, bot_id, username, enabled, created_at in rows:
+        state = Text("Enabled", style="ok") if enabled else Text("Disabled", style="err")
+        table.add_row(str(user_id), str(bot_id), f"@{username}", state, str(created_at))
+    console.print(Panel(table, title=f"Registered Child Bots · {len(rows)}", border_style="cyan"))
 
 
 def indicator(state: str) -> Text:
@@ -176,23 +233,29 @@ def render_checks(checks: Sequence[tuple[str, str, str]]) -> None:
 def run_menu(
     actions: Mapping[str, Callable[[], int | None]],
     state_fn: Callable[[], str],
-    version: str = "",
+    version: str | Callable[[], str] = "",
+    version_error_fn: Callable[[], str | None] | None = None,
 ) -> int:
-    """Interactive loop. Ctrl-C inside an action returns to the menu; at the prompt it exits."""
+    """Interactive menu; version is refreshed on every render."""
     while True:
         if console.is_terminal:
             console.clear()
-        print_logo(version)
-        console.print(Text.assemble(("Service status: ", "bold"), indicator(state_fn())))
-        console.print()
-        table = Table.grid(padding=(0, 2))
-        table.add_column(justify="right", style="accent")
-        table.add_column()
-        for key, label, name in MENU_ITEMS:
-            table.add_row(key, Text(label, style="err" if name == "uninstall" else ""))
-        table.add_row("0", Text("Exit", style="muted"))
-        console.print(Panel(table, title="ZIKO Menu", title_align="left",
-                            border_style="cyan", box=box.ROUNDED))
+        current_version = version() if callable(version) else version
+        version_error = version_error_fn() if version_error_fn else None
+        print_logo(current_version, version_error=version_error)
+        console.print(Panel(
+            Text.assemble(("Service: ", "bold"), indicator(state_fn())),
+            title="Dashboard", border_style="cyan", box=box.ROUNDED,
+        ))
+        for section, action_names in MENU_SECTIONS:
+            table = Table.grid(padding=(0, 2))
+            table.add_column(justify="right", style="accent")
+            table.add_column()
+            for key, label, name in MENU_ITEMS:
+                if name in action_names:
+                    table.add_row(key, Text(label, style="err" if name == "uninstall" else ""))
+            console.print(Panel(table, title=section, border_style="cyan", box=box.ROUNDED))
+        console.print("[muted]0  Exit[/muted]")
         try:
             choice = console.input(Text.assemble(("❯ ", "accent"), "Select an option: ")).strip()
         except (EOFError, KeyboardInterrupt):
@@ -203,7 +266,10 @@ def run_menu(
         name = next((n for k, _, n in MENU_ITEMS if k == choice), None)
         if name is None or name not in actions:
             warn("Invalid option.")
-            console.input(Text("Enter ↵", style="muted"))
+            try:
+                console.input(Text("Press Enter to continue", style="muted"))
+            except (EOFError, KeyboardInterrupt):
+                return 0
             continue
         console.print()
         try:
