@@ -43,6 +43,7 @@ from app.models import (
 __all__ = [
     "SCHEMA_VERSION",
     "Database",
+    "DeliveryOutcome",
     "InvalidReplyTextError",
     "SchemaVersionError",
     "StorageError",
