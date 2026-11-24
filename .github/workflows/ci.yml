@@ -69,4 +69,4 @@ jobs:
       - name: ShellCheck
         run: |
           command -v shellcheck >/dev/null || sudo apt-get install -y shellcheck
-          shellcheck install.sh scripts/*.sh
+          shellcheck -x install.sh scripts/*.sh

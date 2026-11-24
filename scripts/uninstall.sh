@@ -41,8 +41,12 @@ if command -v systemctl >/dev/null; then
   systemctl disable ziko.service 2>/dev/null || true
 fi
 rm -f "${UNIT}"
-command -v systemctl >/dev/null && systemctl daemon-reload || true
-command -v systemctl >/dev/null && systemctl reset-failed ziko.service 2>/dev/null || true
+if command -v systemctl >/dev/null; then
+  systemctl daemon-reload || true
+fi
+if command -v systemctl >/dev/null; then
+  systemctl reset-failed ziko.service 2>/dev/null || true
+fi
 
 # Remove only CLI links that point into our venv.
 for link in /usr/local/bin/*; do
@@ -65,7 +69,9 @@ if [[ "${RMUSER}" -eq 1 ]]; then
     echo "Keeping user ziko: it owns preserved data (use --purge-data with --remove-user)."
   elif id -u ziko >/dev/null 2>&1; then
     userdel ziko 2>/dev/null || true
-    getent group ziko >/dev/null && groupdel ziko 2>/dev/null || true
+    if getent group ziko >/dev/null; then
+      groupdel ziko 2>/dev/null || true
+    fi
     echo "User ziko removed."
   fi
 fi

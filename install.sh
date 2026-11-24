@@ -33,7 +33,9 @@ NEW_ADMINS=""
 log(){ printf '[ziko-install] %s\n' "$*"; }
 die(){ printf '[ziko-install] ERROR: %s\n' "$*" >&2; exit 1; }
 confirm(){ local a; read -r -p "$1 [y/N] " a </dev/tty || return 1; [[ "$a" =~ ^[Yy]([Ee][Ss])?$ ]]; }
+# shellcheck disable=SC2317
 cleanup(){ [[ -n "$STAGE" && -d "$STAGE" ]] && rm -rf -- "$STAGE"; }
+# shellcheck disable=SC2317
 rollback(){
   local rc=$?
   trap - ERR INT TERM

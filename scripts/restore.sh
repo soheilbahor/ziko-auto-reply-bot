@@ -43,7 +43,9 @@ OLD=""
 WAS_ACTIVE=0
 SWAPPED=0
 RESTORED=0
+# shellcheck disable=SC2317
 cleanup(){ rm -rf -- "$WORK"; }
+# shellcheck disable=SC2317
 rollback(){
  rc=$?
  trap - ERR INT TERM
@@ -57,14 +59,16 @@ rollback(){
         chown "$APP_USER:$APP_GROUP" "$DB.rollback.$$" &&
         chmod 600 "$DB.rollback.$$" &&
         mv -f -- "$DB.rollback.$$" "$DB"; then
-       "$PY" - "$DB" <<'PY'
+       if "$PY" - "$DB" <<'PY'
 import sqlite3,sys
 c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True)
 try:
  if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok": raise SystemExit(1)
 finally:c.close()
 PY
-       [[ $? -eq 0 ]] && ROLLBACK_OK=1
+       then
+         ROLLBACK_OK=1
+       fi
      fi
    else
      rm -f -- "$DB"

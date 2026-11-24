@@ -110,8 +110,10 @@ rollback() {
   exit 1
 }
 
+# shellcheck disable=SC2317
 cleanup() { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf -- "$WORK"; }
 
+# shellcheck disable=SC2317
 on_error() {
   local code=$? line="${1:-?}"
   warn "command failed (exit $code) at line $line"
