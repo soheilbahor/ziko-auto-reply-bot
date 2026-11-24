@@ -72,7 +72,7 @@ run_as_service_user() { runuser -u "$SERVICE_USER" -- "$@"; }
 install_requirements() {
   "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check \
     -q -r "$ROOT/requirements.txt"
-  (cd "$ROOT" && "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check --no-deps .)
+  (cd "$ROOT" && "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check .)
 }
 
 rollback() {
