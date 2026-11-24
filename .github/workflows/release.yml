@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Check tag format
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+            || { echo "::error::Tag '$GITHUB_REF_NAME' is not vMAJOR.MINOR.PATCH[-suffix]"; exit 1; }
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install "ruff==0.16.9"
+      - name: Ruff (syntax / undefined names)
+        run: ruff check . --select E9,F63,F7,F82
+      - name: Pytest (strict)
+        env:
+          ZIKO_STRICT: "1"
+        run: pytest -ra
+      - name: Shell syntax
+        run: |
+          bash -n install.sh
+          for f in scripts/*.sh; do bash -n "$f"; done
+
+  release:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build assets
+        run: |
+          set -euo pipefail
+          VERSION="$GITHUB_REF_NAME"
+          NAME="ziko-assistant-${VERSION}"
+          mkdir -p dist
+          git archive --format=tar --prefix="${NAME}/" "$GITHUB_SHA" | tar -x -C dist
+          rm -rf "dist/${NAME}/.github"
+          printf '%s\n' "$VERSION" > "dist/${NAME}/VERSION"
+          for f in app/main.py requirements.txt scripts/update.sh; do
+            test -f "dist/${NAME}/${f}" || { echo "::error::missing ${f}"; exit 1; }
+          done
+          if find "dist/${NAME}" \( -name '.env' -o -name '*.sqlite*' -o -name '*.db' \) | grep -q .; then
+            echo "::error::release tree contains .env or database files"; exit 1
+          fi
+          MTIME="$(git show -s --format=%ct "$GITHUB_SHA")"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${MTIME}" \
+              -cf - -C dist "$NAME" | gzip -n -9 > "dist/${NAME}.tar.gz"
+          (cd dist && zip -qrX "${NAME}.zip" "$NAME")
+          (cd dist && sha256sum "${NAME}.tar.gz" "${NAME}.zip" > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" {f=1; next}
+            f && /^## \[/ {exit}
+            f {print}
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "Release ${GITHUB_REF_NAME}" > notes.md; fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NAME="ziko-assistant-${GITHUB_REF_NAME}"
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/${NAME}.tar.gz" "dist/${NAME}.zip" dist/SHA256SUMS \
+            --title "ZIKO ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag "${flags[@]}"

@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Secrets and local configuration (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Databases, runtime data and backups (never commit)
+data/*
+!data/.gitkeep
+backups/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.pre-restore.*
+*.bak
+*.log
+
+# Build and release output
+dist/
+build/
+*.egg-info/
+*.tar.gz
+*.zip
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

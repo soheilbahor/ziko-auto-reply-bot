@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ziko-assistant"
+version = "0.1.0"
+description = "ZIKO Personal Assistant: Telegram Business auto-reply assistant"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram==3.34.0",
+    "aiosqlite==0.22.1",
+    "rich>=13.7,<15",
+]
+
+[project.scripts]
+ziko = "app.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["*.sql"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

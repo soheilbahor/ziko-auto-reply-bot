@@ -1,0 +1,52 @@
+"""aiogram router for Telegram Business (Chat Automation) updates.
+
+Integration contract
+--------------------
+* ``create_business_router(db, settings)`` returns a fresh ``aiogram.Router``
+  with exactly two handlers:
+  - ``business_connection``: persists connection ID, owner, ``is_enabled`` and
+    ``rights.can_reply`` (only for owners listed in ``settings.admin_ids``).
+  - ``business_message``: new incoming private messages only.
+  ``edited_business_message`` and ``deleted_business_messages`` are
+  intentionally NOT registered.
+* Include the router in the main Dispatcher: ``dp.include_router(router)``.
+* The Dispatcher must receive these update types. ``dp.start_polling(bot)``
+  computes ``allowed_updates`` automatically from registered handlers; if
+  ``allowed_updates`` is passed explicitly it must contain
+  ``business_connection`` and ``business_message``.
+* The bot needs Business Mode enabled in BotFather, and the owner must grant
+  the "reply to messages" right when connecting it under Settings > Chat
+  Automation.
+* ``settings.admin_ids`` must contain the numeric ID of the account owner who
+  connects the bot: connections owned by anyone else are ignored.
+* ``db`` must implement the shared Database contract (see
+  ``app.services.auto_reply.AutoReplyDatabase``).
+"""
+
+from __future__ import annotations
+
+from aiogram import Bot, Router
+from aiogram.types import BusinessConnection, Message
+
+from app.services.auto_reply import AiogramBusinessTransport, AutoReplyDatabase, AutoReplyService, SettingsLike
+
+
+def create_business_router(
+    db: AutoReplyDatabase,
+    settings: SettingsLike,
+    *,
+    service: AutoReplyService | None = None,
+) -> Router:
+    """Build the business router. ``service`` can be injected for testing."""
+    engine = service or AutoReplyService(db, settings)
+    router = Router(name="business")
+
+    @router.business_connection()
+    async def on_business_connection(connection: BusinessConnection) -> None:
+        await engine.handle_business_connection(connection)
+
+    @router.business_message()
+    async def on_business_message(message: Message, bot: Bot) -> None:
+        await engine.handle_business_message(message, AiogramBusinessTransport(bot))
+
+    return router

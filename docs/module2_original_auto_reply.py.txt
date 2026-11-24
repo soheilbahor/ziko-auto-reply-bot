@@ -1,0 +1,515 @@
+"""Automatic reply engine for Telegram Business (connected bot) chats.
+
+This module contains all decision logic. It is deliberately independent of the
+concrete ``Settings`` / ``Database`` classes of Module 1: it only relies on the
+structural contracts declared below (see the Protocol classes), so it can be
+tested with in-memory fakes and mocked Telegram operations.
+
+Contract assumptions about Module 1 (documented, not invented behaviour):
+
+* ``claim_inbound_event(...)`` returns ``True`` when the event is new and
+  ``False`` when it was already seen.
+* ``claim_reply(...)`` returns ``True`` when the caller now owns the one
+  delivery slot for ``(connection_id, chat_id, session_id)`` and ``False`` when
+  a delivery is already in flight or already succeeded. A previously *failed*
+  slot may be claimed again.
+* ``get_business_connection()`` returns the single current connection or
+  ``None``.
+
+Privacy: message bodies are never read, stored or logged. Only IDs are used,
+and identifiers are logged as short one-way hashes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import time
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Protocol
+
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+    TelegramUnauthorizedError,
+)
+
+if TYPE_CHECKING:
+    from aiogram import Bot
+
+LOGGER_NAME = "ziko.auto_reply"
+
+# Telegram's sendMessage text limit (characters, after entity parsing).
+MAX_REPLY_LENGTH = 4096
+# Upper bound for the in-memory flood-control pause per connection.
+MAX_COOLDOWN_SECONDS = 3600.0
+# Unknown/unauthorized connections are not re-fetched from Telegram for this long.
+REJECTED_CONNECTION_TTL_SECONDS = 300.0
+REJECTED_CONNECTION_CACHE_SIZE = 256
+
+
+# --------------------------------------------------------------------------- #
+# Structural contracts (match the shared data contract, no import of Module 1)
+# --------------------------------------------------------------------------- #
+class AppStateLike(Protocol):
+    @property
+    def enabled(self) -> bool: ...
+    @property
+    def active_status_key(self) -> str | None: ...
+    @property
+    def session_id(self) -> str | None: ...
+
+
+class StatusLike(Protocol):
+    @property
+    def reply_text(self) -> str: ...
+
+
+class ConnectionStateLike(Protocol):
+    @property
+    def connection_id(self) -> str: ...
+    @property
+    def is_enabled(self) -> bool: ...
+    @property
+    def can_reply(self) -> bool: ...
+    @property
+    def owner_user_id(self) -> int: ...
+
+
+class SettingsLike(Protocol):
+    @property
+    def admin_ids(self) -> frozenset[int]: ...
+
+
+class AutoReplyDatabase(Protocol):
+    """The subset of the Module 1 ``Database`` interface used by the engine."""
+
+    async def get_app_state(self) -> AppStateLike: ...
+    async def get_status(self, status_key: str) -> StatusLike | None: ...
+    async def save_business_connection(
+        self, connection_id: str, is_enabled: bool, can_reply: bool, owner_user_id: int
+    ) -> None: ...
+    async def get_business_connection(self) -> ConnectionStateLike | None: ...
+    async def claim_inbound_event(self, connection_id: str, chat_id: int, message_id: int) -> bool: ...
+    async def claim_reply(self, connection_id: str, chat_id: int, session_id: str) -> bool: ...
+    async def complete_reply(
+        self,
+        connection_id: str,
+        chat_id: int,
+        session_id: str,
+        sent: bool,
+        telegram_message_id: int | None = None,
+        error: str | None = None,
+    ) -> None: ...
+
+
+class BusinessTransport(Protocol):
+    """Telegram operations needed by the engine (mockable in tests)."""
+
+    async def send_text(self, *, connection_id: str, chat_id: int, text: str) -> int | None:
+        """Send ``text`` through the business connection; return the new message ID."""
+        ...
+
+    async def fetch_connection(self, connection_id: str) -> Any:
+        """Official ``getBusinessConnection``; returns a BusinessConnection-like object."""
+        ...
+
+
+class AiogramBusinessTransport:
+    """Production transport backed by aiogram's ``Bot`` (official Bot API methods)."""
+
+    def __init__(self, bot: Bot) -> None:
+        self._bot = bot
+
+    async def send_text(self, *, connection_id: str, chat_id: int, text: str) -> int | None:
+        sent = await self._bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            business_connection_id=connection_id,
+            # Owner-edited text is sent verbatim; never let a bot-wide default
+            # parse mode (HTML/Markdown) mangle or reject it.
+            parse_mode=None,
+        )
+        return sent.message_id
+
+    async def fetch_connection(self, connection_id: str) -> Any:
+        return await self._bot.get_business_connection(business_connection_id=connection_id)
+
+
+# --------------------------------------------------------------------------- #
+# Outcomes
+# --------------------------------------------------------------------------- #
+class ReplyOutcome(StrEnum):
+    SENT = "sent"
+    FAILED = "failed"
+    RATE_LIMITED = "rate_limited"
+    COOLDOWN_ACTIVE = "cooldown_active"
+    DUPLICATE_EVENT = "duplicate_event"
+    ALREADY_REPLIED = "already_replied"
+    STATE_CHANGED = "state_changed"
+    INTERNAL_ERROR = "internal_error"
+    IGNORED_NO_CONNECTION_ID = "ignored_no_connection_id"
+    IGNORED_NOT_PRIVATE = "ignored_not_private"
+    IGNORED_NO_SENDER = "ignored_no_sender"
+    IGNORED_BOT = "ignored_bot"
+    IGNORED_ADMIN_CHAT = "ignored_admin_chat"
+    IGNORED_UNAUTHORIZED_CONNECTION = "ignored_unauthorized_connection"
+    IGNORED_CONNECTION_DISABLED = "ignored_connection_disabled"
+    IGNORED_NO_REPLY_RIGHT = "ignored_no_reply_right"
+    IGNORED_OWNER = "ignored_owner"
+    IGNORED_AUTOREPLY_OFF = "ignored_autoreply_off"
+    IGNORED_NO_REPLY_TEXT = "ignored_no_reply_text"
+
+
+class ConnectionOutcome(StrEnum):
+    SAVED = "saved"
+    IGNORED_UNAUTHORIZED = "ignored_unauthorized"
+    IGNORED_STALE_DISABLED = "ignored_stale_disabled"
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionInfo:
+    connection_id: str
+    is_enabled: bool
+    can_reply: bool
+    owner_user_id: int
+
+
+def redact_id(value: object) -> str:
+    """Short one-way reference for logs; never log raw connection/chat IDs."""
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:8]
+
+
+def connection_info_from_update(connection: Any) -> _ConnectionInfo:
+    """Map a Bot API ``BusinessConnection`` to the fields we persist.
+
+    ``rights.can_reply`` is the current field (Bot API 9.0+). The top-level
+    ``can_reply`` is deprecated and only used when ``rights`` is absent.
+    """
+    rights = getattr(connection, "rights", None)
+    if rights is not None:
+        can_reply = bool(getattr(rights, "can_reply", False))
+    else:
+        can_reply = bool(getattr(connection, "can_reply", False))
+    return _ConnectionInfo(
+        connection_id=str(connection.id),
+        is_enabled=bool(connection.is_enabled),
+        can_reply=can_reply,
+        owner_user_id=int(connection.user.id),
+    )
+
+
+def _error_text(exc: BaseException) -> str:
+    return str(getattr(exc, "message", "") or exc).lower()
+
+
+def _looks_like_invalid_connection(exc: BaseException) -> bool:
+    # Lenient match: the exact Telegram error string for a revoked connection
+    # was not verified against the docs, so match on its general shape.
+    text = _error_text(exc)
+    return "business" in text and "connection" in text
+
+
+class AutoReplyService:
+    """Decides whether and what to auto-reply, and performs the delivery."""
+
+    def __init__(
+        self,
+        db: AutoReplyDatabase,
+        settings: SettingsLike,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._db = db
+        self._admin_ids = frozenset(settings.admin_ids)
+        self._clock = clock
+        self._logger = logger or logging.getLogger(LOGGER_NAME)
+        self._cooldown_until: dict[str, float] = {}
+        self._rejected: OrderedDict[str, float] = OrderedDict()
+
+    # ------------------------------------------------------------------ #
+    # business_connection updates
+    # ------------------------------------------------------------------ #
+    async def handle_business_connection(self, connection: Any) -> ConnectionOutcome:
+        info = connection_info_from_update(connection)
+        outcome = await self._persist_connection(info)
+        self._log(
+            logging.INFO,
+            "business_connection",
+            conn=redact_id(info.connection_id),
+            enabled=info.is_enabled,
+            can_reply=info.can_reply,
+            outcome=outcome.value,
+        )
+        return outcome
+
+    async def _persist_connection(self, info: _ConnectionInfo) -> ConnectionOutcome:
+        if info.owner_user_id not in self._admin_ids:
+            return ConnectionOutcome.IGNORED_UNAUTHORIZED
+        stored = await self._db.get_business_connection()
+        if stored is not None and stored.connection_id != info.connection_id and not info.is_enabled:
+            # A disabled foreign/old connection must not replace the active one.
+            return ConnectionOutcome.IGNORED_STALE_DISABLED
+        await self._db.save_business_connection(
+            info.connection_id, info.is_enabled, info.can_reply, info.owner_user_id
+        )
+        self._rejected.pop(info.connection_id, None)
+        return ConnectionOutcome.SAVED
+
+    # ------------------------------------------------------------------ #
+    # business_message updates
+    # ------------------------------------------------------------------ #
+    async def handle_business_message(self, message: Any, transport: BusinessTransport) -> ReplyOutcome:
+        """Process one new incoming business message. Never raises (except cancellation)."""
+        try:
+            return await self._handle_business_message(message, transport)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep the polling loop alive
+            self._log(logging.ERROR, "business_message_unhandled_error", error=type(exc).__name__)
+            return ReplyOutcome.INTERNAL_ERROR
+
+    async def _handle_business_message(self, message: Any, transport: BusinessTransport) -> ReplyOutcome:
+        connection_id = getattr(message, "business_connection_id", None)
+        if not isinstance(connection_id, str) or not connection_id.strip():
+            return ReplyOutcome.IGNORED_NO_CONNECTION_ID
+
+        chat = getattr(message, "chat", None)
+        if chat is None or getattr(chat, "type", None) != "private":
+            return ReplyOutcome.IGNORED_NOT_PRIVATE
+
+        sender = getattr(message, "from_user", None)
+        if sender is None:
+            return ReplyOutcome.IGNORED_NO_SENDER
+        if getattr(sender, "is_bot", False):
+            return ReplyOutcome.IGNORED_BOT
+        if chat.id in self._admin_ids or sender.id in self._admin_ids:
+            return ReplyOutcome.IGNORED_ADMIN_CHAT
+
+        info = await self._resolve_connection(connection_id, transport)
+        if info is None or info.owner_user_id not in self._admin_ids:
+            return self._ignored(ReplyOutcome.IGNORED_UNAUTHORIZED_CONNECTION, info_id=connection_id)
+        if not info.is_enabled:
+            return self._ignored(ReplyOutcome.IGNORED_CONNECTION_DISABLED, info_id=connection_id)
+        if not info.can_reply:
+            return self._ignored(ReplyOutcome.IGNORED_NO_REPLY_RIGHT, info_id=connection_id)
+        if sender.id == info.owner_user_id or chat.id == info.owner_user_id:
+            return ReplyOutcome.IGNORED_OWNER
+
+        if self._cooldown_active(connection_id):
+            return self._ignored(ReplyOutcome.COOLDOWN_ACTIVE, info_id=connection_id)
+
+        # Cheap early exits so nothing is recorded while auto-reply is OFF.
+        state = await self._db.get_app_state()
+        if not state.enabled or not state.active_status_key or not state.session_id:
+            return ReplyOutcome.IGNORED_AUTOREPLY_OFF
+        status = await self._db.get_status(state.active_status_key)
+        if self._valid_text(status) is None:
+            return self._ignored(ReplyOutcome.IGNORED_NO_REPLY_TEXT, info_id=connection_id)
+        session_id = state.session_id
+
+        if not await self._db.claim_inbound_event(connection_id, chat.id, message.message_id):
+            return ReplyOutcome.DUPLICATE_EVENT
+        if not await self._db.claim_reply(connection_id, chat.id, session_id):
+            return ReplyOutcome.ALREADY_REPLIED
+
+        return await self._deliver(info, chat.id, session_id, transport)
+
+    async def _deliver(
+        self, info: _ConnectionInfo, chat_id: int, session_id: str, transport: BusinessTransport
+    ) -> ReplyOutcome:
+        """Send the reply for an already-claimed slot and always complete it."""
+        cid = info.connection_id
+        try:
+            # Re-check global state right before sending (it may have changed
+            # while the slot was being claimed).
+            state = await self._db.get_app_state()
+            text: str | None = None
+            if state.enabled and state.session_id == session_id and state.active_status_key:
+                text = self._valid_text(await self._db.get_status(state.active_status_key))
+            if text is None:
+                await self._complete(cid, chat_id, session_id, False, error="state_changed")
+                return ReplyOutcome.STATE_CHANGED
+            message_id = await transport.send_text(connection_id=cid, chat_id=chat_id, text=text)
+        except asyncio.CancelledError:
+            # The message may or may not have reached Telegram; release the slot.
+            await asyncio.shield(self._complete(cid, chat_id, session_id, False, error="cancelled"))
+            raise
+        except TelegramRetryAfter as exc:
+            delay = min(float(exc.retry_after), MAX_COOLDOWN_SECONDS)
+            self._cooldown_until[cid] = self._clock() + delay
+            return await self._fail(
+                cid, chat_id, session_id, f"retry_after:{int(exc.retry_after)}", ReplyOutcome.RATE_LIMITED
+            )
+        except TelegramForbiddenError:
+            outcome = await self._fail(cid, chat_id, session_id, "telegram_forbidden")
+            await self._refresh_after_failure(info, transport)
+            return outcome
+        except TelegramBadRequest as exc:
+            invalid = _looks_like_invalid_connection(exc)
+            outcome = await self._fail(
+                cid, chat_id, session_id, "invalid_connection" if invalid else "telegram_bad_request"
+            )
+            if invalid:
+                await self._refresh_after_failure(info, transport)
+            return outcome
+        except TelegramUnauthorizedError:
+            return await self._fail(cid, chat_id, session_id, "telegram_unauthorized")
+        except (TelegramNetworkError, TelegramServerError, TimeoutError):
+            return await self._fail(cid, chat_id, session_id, "network_error")
+        except TelegramAPIError:
+            return await self._fail(cid, chat_id, session_id, "telegram_api_error")
+        except Exception:  # noqa: BLE001
+            return await self._fail(cid, chat_id, session_id, "unexpected_error", ReplyOutcome.INTERNAL_ERROR)
+
+        recorded = await self._complete(cid, chat_id, session_id, True, message_id=message_id)
+        self._log(
+            logging.INFO if recorded else logging.ERROR,
+            "auto_reply_sent" if recorded else "auto_reply_sent_but_not_recorded",
+            conn=redact_id(cid),
+            chat=redact_id(chat_id),
+        )
+        return ReplyOutcome.SENT
+
+    # ------------------------------------------------------------------ #
+    # helpers
+    # ------------------------------------------------------------------ #
+    async def _resolve_connection(self, connection_id: str, transport: BusinessTransport) -> _ConnectionInfo | None:
+        stored = await self._db.get_business_connection()
+        if stored is not None and stored.connection_id == connection_id:
+            return _ConnectionInfo(
+                stored.connection_id, bool(stored.is_enabled), bool(stored.can_reply), int(stored.owner_user_id)
+            )
+        # Unknown connection (e.g. update missed while offline): verify with Telegram.
+        if self._is_rejected(connection_id):
+            return None
+        try:
+            fetched = await transport.fetch_connection(connection_id)
+            info = connection_info_from_update(fetched)
+            if info.connection_id != connection_id:
+                raise ValueError("connection id mismatch")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._remember_rejected(connection_id)
+            self._log(logging.WARNING, "connection_lookup_failed", conn=redact_id(connection_id), error=type(exc).__name__)
+            return None
+        if await self._persist_connection(info) is not ConnectionOutcome.SAVED:
+            self._remember_rejected(connection_id)
+            return None
+        return info
+
+    async def _refresh_after_failure(self, info: _ConnectionInfo, transport: BusinessTransport) -> None:
+        """Best-effort resync of the stored connection after a send failure."""
+        try:
+            try:
+                fresh = connection_info_from_update(await transport.fetch_connection(info.connection_id))
+            except (TelegramBadRequest, TelegramForbiddenError):
+                # Telegram no longer knows this connection: disable it locally.
+                fresh = _ConnectionInfo(info.connection_id, False, False, info.owner_user_id)
+            await self._persist_connection(fresh)
+            self._log(
+                logging.WARNING,
+                "connection_resynced",
+                conn=redact_id(info.connection_id),
+                enabled=fresh.is_enabled,
+                can_reply=fresh.can_reply,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._log(logging.WARNING, "connection_resync_failed", error=type(exc).__name__)
+
+    async def _fail(
+        self,
+        connection_id: str,
+        chat_id: int,
+        session_id: str,
+        code: str,
+        outcome: ReplyOutcome = ReplyOutcome.FAILED,
+    ) -> ReplyOutcome:
+        # ``code`` is always a fixed, safe string - never an exception message.
+        await self._complete(connection_id, chat_id, session_id, False, error=code)
+        self._log(
+            logging.WARNING,
+            "auto_reply_failed",
+            conn=redact_id(connection_id),
+            chat=redact_id(chat_id),
+            error=code,
+        )
+        return outcome
+
+    async def _complete(
+        self,
+        connection_id: str,
+        chat_id: int,
+        session_id: str,
+        sent: bool,
+        *,
+        message_id: int | None = None,
+        error: str | None = None,
+    ) -> bool:
+        for attempt in (1, 2):
+            try:
+                await self._db.complete_reply(
+                    connection_id, chat_id, session_id, sent, telegram_message_id=message_id, error=error
+                )
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._log(logging.ERROR, "complete_reply_failed", attempt=attempt, error=type(exc).__name__)
+                if attempt == 1:
+                    await asyncio.sleep(0.05)
+        return False
+
+    @staticmethod
+    def _valid_text(status: StatusLike | None) -> str | None:
+        if status is None:
+            return None
+        text = status.reply_text
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_REPLY_LENGTH:
+            return None
+        return text
+
+    def _cooldown_active(self, connection_id: str) -> bool:
+        until = self._cooldown_until.get(connection_id)
+        if until is None:
+            return False
+        if self._clock() >= until:
+            self._cooldown_until.pop(connection_id, None)
+            return False
+        return True
+
+    def _is_rejected(self, connection_id: str) -> bool:
+        expiry = self._rejected.get(connection_id)
+        if expiry is None:
+            return False
+        if self._clock() >= expiry:
+            self._rejected.pop(connection_id, None)
+            return False
+        return True
+
+    def _remember_rejected(self, connection_id: str) -> None:
+        self._rejected[connection_id] = self._clock() + REJECTED_CONNECTION_TTL_SECONDS
+        self._rejected.move_to_end(connection_id)
+        while len(self._rejected) > REJECTED_CONNECTION_CACHE_SIZE:
+            self._rejected.popitem(last=False)
+
+    def _ignored(self, outcome: ReplyOutcome, *, info_id: str) -> ReplyOutcome:
+        self._log(logging.DEBUG, "business_message_ignored", conn=redact_id(info_id), outcome=outcome.value)
+        return outcome
+
+    def _log(self, level: int, event: str, **fields: object) -> None:
+        if self._logger.isEnabledFor(level):
+            details = " ".join(f"{key}={value}" for key, value in fields.items())
+            self._logger.log(level, "%s %s", event, details, extra={"event": event, **fields})

@@ -1,0 +1,12 @@
+ZIKO Personal Assistant - Module 4 (Testing, Security & QA) manifest
+Revision: delivery API update (claim_token / DeliveryOutcome / release_reply)
+
+tests/conftest.py	28581 bytes	699 lines	0 tests	sha256=fb6f6f13cc93928d
+tests/test_storage.py	25002 bytes	572 lines	46 tests	sha256=e245ba986f4ade39
+tests/test_business_handler.py	15413 bytes	353 lines	37 tests	sha256=017b11bbff2ed67e
+tests/test_admin_security.py	16822 bytes	402 lines	23 tests	sha256=48ba3f8ab9d38f43
+tests/test_status_sessions.py	6635 bytes	165 lines	16 tests	sha256=814f4209b347fc9a
+SECURITY.md	9806 bytes	114 lines	0 tests	sha256=34c8130951af0da8
+QA_REPORT_TEMPLATE.md	8961 bytes	148 lines	0 tests	sha256=45432621b6420952
+
+Total test functions: 122 (parametrized cases expand this at run time)
