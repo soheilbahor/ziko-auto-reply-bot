@@ -1,4 +1,14 @@
-## 1.0.9 maintenance revision (unreleased)
+## [1.1.0] - 2026-11-24
+
+- Fix Telegram Managed Bot update registration by registering the `managed_bot` filter on the root `Dispatcher.update` observer. Child `Router` instances do not expose the root-only `update` observer.
+- Preserve the existing secure managed-bot token retrieval, encrypted registry update, and tenant startup flow.
+- Add a nested terminal navigation system with Bot Management, Tenant Management, Auto Reply, Telegram Business, Backup & Restore, and Logs sections.
+- Add distinct log actions for the last 50 lines, live follow, and a validated custom line count; keep bot inventory and existing maintenance actions reachable.
+- Add concise operator guides for tenant management, auto-reply settings, and Telegram Business.
+- Improve terminal rendering on narrow, ASCII-only, and no-colour consoles while preserving the existing diagnostics, update center, security checks, and resource dashboard.
+- Promote the 1.0.9 maintenance changes into the 1.1.0 release.
+
+## 1.0.9 maintenance revision (included in 1.1.0)
 
 - Require root at the beginning of the installer and for every ZIKO CLI invocation.
 - Add explicit root-only access guidance and post-install instructions.

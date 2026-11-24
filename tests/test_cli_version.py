@@ -39,7 +39,7 @@ def test_menu_formats_versions_and_refreshes_after_update(tmp_path: Path, monkey
     monkeypatch.setattr(cli_menu, "err_console", Console(file=errors, theme=cli_menu.THEME, stderr=True, width=100))
     rendered: list[str] = []
     monkeypatch.setattr(cli_menu, "print_logo", lambda version="", version_error=None: rendered.append(version))
-    inputs = iter(["9", "", "0"])
+    inputs = iter(["6", "", "q"])
     monkeypatch.setattr(cli_menu.console, "input", lambda prompt="": next(inputs))
 
     def update() -> int:

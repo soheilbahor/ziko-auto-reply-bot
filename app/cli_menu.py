@@ -15,8 +15,12 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
+from app import cli_nav
+
 CYAN = (34, 211, 238)
 VIOLET = (139, 92, 246)
+NARROW = 60
+MAX_WIDTH = 80
 
 THEME = Theme(
     {
@@ -51,7 +55,46 @@ _STATES = {
     "not-found": ("Not installed", "err"),
     "unknown": ("Unknown", "warn"),
 }
-_LEVELS = {"ok": ("✔", "ok"), "warn": ("!", "warn"), "fail": ("✘", "err")}
+_LEVELS = {
+    "ok": ("✔", "[OK]", "ok"),
+    "warn": ("!", "[WARN]", "warn"),
+    "fail": ("✘", "[FAIL]", "err"),
+    "info": ("ℹ", "[INFO]", "info"),
+}
+
+
+def _ascii(con: Console | None = None) -> bool:
+    return (con or console).options.ascii_only
+
+
+def _plain(con: Console | None = None) -> bool:
+    con = con or console
+    return bool(con.no_color) or con.color_system is None or _ascii(con)
+
+
+def _sym(fancy: str, plain: str) -> str:
+    return plain if _ascii() else fancy
+
+
+def _sep() -> str:
+    return _sym("  ·  ", "  |  ")
+
+
+def _marker(level: str, con: Console | None = None) -> tuple[str, str]:
+    symbol, fallback, style = _LEVELS[level]
+    return (fallback if _plain(con) else symbol), style
+
+
+def _panel_width() -> int:
+    return min(console.width, MAX_WIDTH)
+
+
+def _narrow() -> bool:
+    return console.width < NARROW
+
+
+def _t(value: str | Text) -> Text:
+    return Text(value) if isinstance(value, str) else value
 
 MENU_ITEMS: Sequence[tuple[str, str, str]] = (
     ("1", "Dashboard / service status", "status"),
@@ -97,8 +140,12 @@ def _format_version_badge(version: str) -> str:
 def logo(version: str = "") -> Text:
     """Cyan-to-violet logo with a normalized version badge."""
     badge = _format_version_badge(version)
-    if console.options.ascii_only:
-        return Text(" ".join(part for part in ("ZIKO", badge) if part), style="bold cyan")
+    if _ascii() or _narrow():
+        text = Text("ZIKO", style="bold cyan")
+        if badge:
+            text.append(_sep(), style="muted")
+            text.append(badge, style="accent")
+        return text
     rows = ["  ".join(_GLYPHS[ch][i] for ch in "ZIKO") for i in range(5)]
     width = max(len(r) for r in rows)
     text = Text()
@@ -155,23 +202,28 @@ def render_bot_list(rows: Sequence[tuple[object, ...]]) -> None:
 
 def indicator(state: str) -> Text:
     label, style = _STATES.get(state, _STATES["unknown"])
-    return Text.assemble(("● ", style), (label, style))
+    return Text.assemble((_sym("●", "*") + " ", style), (label, style))
+
+
+def _say(con: Console, level: str, message: str) -> None:
+    mark, style = _marker(level, con)
+    con.print(Text.assemble((mark + " ", style), message))
 
 
 def ok(message: str) -> None:
-    console.print(Text.assemble(("✔ ", "ok"), message))
+    _say(console, "ok", message)
 
 
 def warn(message: str) -> None:
-    console.print(Text.assemble(("! ", "warn"), message))
+    _say(console, "warn", message)
 
 
 def error(message: str) -> None:
-    err_console.print(Text.assemble(("✘ ", "err"), message))
+    _say(err_console, "fail", message)
 
 
 def info(message: str) -> None:
-    console.print(Text.assemble(("ℹ ", "info"), message))
+    _say(console, "info", message)
 
 
 def confirm(question: str, default: bool = False) -> bool:
@@ -194,12 +246,13 @@ def ask(question: str) -> str:
 
 
 def _grid(title: str, rows: Sequence[tuple[str, str | Text]], style: str = "cyan") -> Panel:
-    table = Table.grid(padding=(0, 2))
-    table.add_column(style="bold")
-    table.add_column()
+    table = Table.grid(padding=(0, 1) if _narrow() else (0, 2))
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column(overflow="fold")
     for label, value in rows:
-        table.add_row(label, value)
-    return Panel(table, title=title, title_align="left", border_style=style, box=box.ROUNDED)
+        table.add_row(label, _t(value))
+    return Panel(table, title=title, title_align="left", border_style=style,
+                 box=box.ROUNDED, width=_panel_width(), padding=(0, 1) if _narrow() else (0, 2))
 
 
 def render_status(rows: Sequence[tuple[str, str | Text]]) -> None:
@@ -262,6 +315,87 @@ def render_release_choices(releases: Sequence[tuple[str, str]]) -> None:
     console.print(Panel(table, title="Available Stable Releases", border_style="cyan"))
 
 
+def section(title: str) -> None:
+    console.print(Panel(Text(title, style="bold cyan"), border_style="cyan", box=box.SIMPLE))
+
+
+_GUIDES = {
+    "tenants": (
+        "Tenant Management",
+        "Each user can connect one dedicated bot. Registration and lifecycle are managed by ZIKO.",
+        [
+            "Users create a bot through Telegram's official managed-bot flow or connect an existing bot token privately.",
+            "Bot tokens are validated and stored encrypted; never request or share tokens in support chats.",
+            "Use 'ziko bots list' to inspect registered child bots without revealing credentials.",
+            "Use the main service logs and diagnostics when a child bot fails to start.",
+        ],
+    ),
+    "autoreply": (
+        "Auto Reply Settings",
+        "Auto-reply behavior is configured from the Telegram bot interface and Telegram Business connection.",
+        [
+            "Open your dedicated ZIKO bot and use /start to open its controls.",
+            "Configure the reply text and the enabled behavior from the bot's settings.",
+            "For personal-account replies, connect the bot under Telegram Settings → Telegram Business → Chatbots.",
+        ],
+    ),
+    "business": (
+        "Telegram Business",
+        "Connect a bot to your Telegram Business account to allow it to reply to eligible chats.",
+        [
+            "Enable Business Mode for the bot in @BotFather if required.",
+            "Open Telegram Settings → Telegram Business → Chatbots.",
+            "Select the bot and grant the 'Reply to messages' permission for the chats it may answer.",
+            "Return to ZIKO and check the connection status; confirm that reply permission is active.",
+        ],
+    ),
+}
+
+
+def show_guide(key: str) -> int:
+    guide = _GUIDES.get(key)
+    if guide is None:
+        warn("Guide not found.")
+        return 2
+    title, intro, points = guide
+    table = Table.grid(padding=(0, 1))
+    table.add_column(justify="right", style="accent", no_wrap=True)
+    table.add_column(overflow="fold")
+    for index, point in enumerate(points, 1):
+        table.add_row(f"{index}.", point)
+    body = Table.grid()
+    body.add_column(overflow="fold")
+    body.add_row(intro)
+    body.add_row("")
+    body.add_row(table)
+    console.print(Panel(body, title=title, border_style="cyan", box=box.ROUNDED))
+    return 0
+
+
+def _menu_panel(menu: cli_nav.Menu, stack: Sequence[str]) -> Panel:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(justify="right", style="accent", no_wrap=True)
+    table.add_column(no_wrap=not _narrow(), overflow="fold")
+    if not _narrow():
+        table.add_column(style="muted", overflow="ellipsis")
+    for item in menu.items:
+        quiet = item.kind in (cli_nav.BACK, cli_nav.EXIT)
+        style = "err" if item.danger else "muted" if quiet else ""
+        if _narrow():
+            table.add_row(item.key, Text(item.label, style=style))
+        else:
+            table.add_row(item.key, Text(item.label, style=style), item.hint)
+    title = _sym(" › ", " > ").join(cli_nav.breadcrumb(stack))
+    return Panel(table, title=title, border_style="cyan", box=box.ROUNDED,
+                 width=_panel_width(), padding=(0, 1) if _narrow() else (0, 2))
+
+
+def _footer(stack: Sequence[str]) -> Text:
+    if len(stack) == 1:
+        return Text("Enter a number  |  q or 0 = quit", style="muted")
+    return Text("Enter a number  |  b or 0 = back  |  q = quit", style="muted")
+
+
 def run_menu(
     actions: Mapping[str, Callable[[], int | None]],
     state_fn: Callable[[], str],
@@ -269,61 +403,57 @@ def run_menu(
     version_error_fn: Callable[[], str | None] | None = None,
     update_status_fn: Callable[[], Mapping[str, object]] | None = None,
 ) -> int:
-    """Interactive menu; version is refreshed on every render."""
-    while True:
+    """Nested CLI menu. All existing command handlers remain injected by app.cli."""
+    def show(menu: cli_nav.Menu, stack: Sequence[str]) -> None:
         if console.is_terminal:
             console.clear()
-        current_version = version() if callable(version) else version
+        current = version() if callable(version) else version
         version_error = version_error_fn() if version_error_fn else None
-        print_logo(current_version, version_error=version_error)
+        print_logo(current, version_error=version_error)
         console.print(Panel(
             Text.assemble(("Service: ", "bold"), indicator(state_fn())),
             title="Dashboard", border_style="cyan", box=box.ROUNDED,
         ))
-        update = update_status_fn() if update_status_fn else {}
-        if update.get("reachable") and update.get("available"):
-            update_badge = Text.assemble(("● ", "ok"), (f"Update available · v{update.get('stable')}", "ok"))
-        elif update.get("reachable"):
-            update_badge = Text.assemble(("● ", "ok"), ("System up to date", "ok"))
-        else:
-            update_badge = Text.assemble(("● ", "warn"), ("Update status unavailable", "warn"))
-        console.print(Panel(update_badge, title="UPDATE", border_style="green" if update.get("reachable") and update.get("available") else "cyan", box=box.ROUNDED))
-        for section, action_names in MENU_SECTIONS:
-            table = Table.grid(padding=(0, 2))
-            table.add_column(justify="right", style="accent")
-            table.add_column()
-            for key, label, name in MENU_ITEMS:
-                if name in action_names:
-                    if name == "update" and update.get("reachable") and update.get("available"):
-                        display = Text.assemble((label, "bold"), ("  ● UPDATE AVAILABLE", "ok"))
-                    else:
-                        display = Text(label, style="err" if name == "uninstall" else "")
-                    table.add_row(key, display)
-            console.print(Panel(table, title=section, border_style="cyan", box=box.ROUNDED))
-        console.print("[muted]0  Exit[/muted]")
-        try:
-            choice = console.input(Text.assemble(("❯ ", "accent"), "Select an option: ")).strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print()
-            return 0
-        if choice in {"0", "q", "exit", "quit"}:
-            return 0
-        name = next((n for k, _, n in MENU_ITEMS if k == choice), None)
-        if name is None or name not in actions:
-            warn("Invalid option.")
+        if len(stack) == 1 and update_status_fn:
             try:
-                console.input(Text("Press Enter to continue", style="muted"))
-            except (EOFError, KeyboardInterrupt):
-                return 0
-            continue
+                update = update_status_fn()
+                if update.get("reachable") and update.get("available"):
+                    update_badge = Text.assemble(("● ", "ok"), (f"Update available · v{update.get('stable')}", "ok"))
+                elif update.get("reachable"):
+                    update_badge = Text.assemble(("● ", "ok"), ("System up to date", "ok"))
+                else:
+                    update_badge = Text.assemble(("● ", "warn"), ("Update status unavailable", "warn"))
+                console.print(Panel(update_badge, title="UPDATE", border_style="cyan", box=box.ROUNDED))
+            except Exception:
+                console.print(Panel(Text("Update status unavailable", style="warn"), title="UPDATE", border_style="cyan"))
+        console.print(_menu_panel(menu, stack))
+        console.print(_footer(stack))
+
+    def read_choice(_menu: cli_nav.Menu) -> str:
+        return console.input(Text.assemble(("❯ ", "accent"), "Select an option: "))
+
+    def invalid(raw: str) -> None:
+        warn(f"Invalid option: {raw.strip()[:20]!r}. Enter one of the numbers shown.")
+        _wait_for_enter()
+
+    def interrupted() -> None:
+        info("Action interrupted. Returning to menu.")
+
+    def pause() -> None:
+        _wait_for_enter("Press Enter to return to the menu")
+
+    try:
+        return cli_nav.run_menus(
+            cli_nav.MENUS, actions, show=show, read_choice=read_choice,
+            invalid=invalid, announce=lambda item: section(item.label),
+            pause=pause, interrupted=interrupted,
+        )
+    finally:
         console.print()
-        try:
-            actions[name]()
-        except KeyboardInterrupt:
-            console.print()
-            info("Returning to menu.")
-        try:
-            console.input(Text("\nPress Enter to return to the menu ↵ ", style="muted"))
-        except (EOFError, KeyboardInterrupt):
-            console.print()
-            return 0
+
+
+def _wait_for_enter(message: str = "Press Enter to continue") -> None:
+    try:
+        console.input(Text(message, style="muted"))
+    except (EOFError, KeyboardInterrupt):
+        pass

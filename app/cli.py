@@ -1118,12 +1118,24 @@ def _interactive() -> int:
         return 2
 
 
+    def logs_custom() -> int:
+        raw = ui.ask("Number of lines (1-5000, empty = cancel)")
+        if not raw:
+            return 0
+        if not (raw.isascii() and raw.isdigit() and 1 <= int(raw) <= 5000):
+            ui.warn("Enter a whole number between 1 and 5000.")
+            return 1
+        return cmd_logs(int(raw))
+
     actions = {
         "status": cmd_status, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
-        "logs": lambda: cmd_logs(50, follow=True), "backup": cmd_backup, "restore": restore,
+        "logs_tail": lambda: cmd_logs(50), "logs_follow": lambda: cmd_logs(50, follow=True),
+        "logs_custom": logs_custom, "backup": cmd_backup, "restore": restore,
         "update": update_center, "config": config, "doctor": cmd_doctor,
-        "version": cmd_version, "help": cmd_help, "bots": cmd_bots_list,
-        "uninstall": cmd_uninstall,
+        "help": cmd_help, "bots": cmd_bots_list, "uninstall": cmd_uninstall,
+        "tenants": lambda: ui.show_guide("tenants"),
+        "autoreply": lambda: ui.show_guide("autoreply"),
+        "business": lambda: ui.show_guide("business"),
     }
     return ui.run_menu(actions, service_state, version=_version, version_error_fn=_version_error, update_status_fn=update_status)
 

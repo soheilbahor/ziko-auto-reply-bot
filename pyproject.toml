@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ziko-assistant"
-version = "1.0.9"
+version = "1.1.0"
 description = "ZIKO Personal Assistant: Telegram Business auto-reply assistant"
 requires-python = ">=3.12"
 dependencies = [

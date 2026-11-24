@@ -41,7 +41,7 @@ async def run() -> None:
         # Onboarding must precede the admin router's catch-all, while its filters
         # deliberately let admin /start and non-onboarding /cancel reach that router.
         dp.include_router(create_tenant_router(
-            registry=registry, manager=manager, master_bot_id=master_bot_id,
+            dispatcher=dp, registry=registry, manager=manager, master_bot_id=master_bot_id,
             admin_ids=settings.admin_ids,
         ))
         dp.include_router(create_admin_router(db, settings))

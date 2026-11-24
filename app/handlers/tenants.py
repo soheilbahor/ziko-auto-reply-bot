@@ -7,7 +7,7 @@ import re
 import secrets
 from urllib.parse import quote
 
-from aiogram import Bot, F, Router
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -35,8 +35,9 @@ class BotSetup(StatesGroup):
     waiting_for_token = State()
 
 
-def create_tenant_router(*, registry: TenantRegistry, manager: TenantBotManager,
-                         master_bot_id: int, admin_ids: frozenset[int]) -> Router:
+def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
+                         manager: TenantBotManager, master_bot_id: int,
+                         admin_ids: frozenset[int]) -> Router:
     router = Router(name="tenant_onboarding")
     router.message.filter(F.chat.type == ChatType.PRIVATE)
 
@@ -192,7 +193,8 @@ def create_tenant_router(*, registry: TenantRegistry, manager: TenantBotManager,
     async def invalid_token_message(message: Message) -> None:
         await message.answer("لطفاً توکن را به‌صورت متن ارسال کنید؛ برای انصراف /cancel را بفرستید.")
 
-    @router.update(F.managed_bot)
+    # ``update`` is a root-Dispatcher observer in aiogram; child Routers do not expose it.
+    @dispatcher.update(F.managed_bot)
     async def managed_bot_updated(update: Update, bot: Bot) -> None:
         event = update.managed_bot
         if event is None:

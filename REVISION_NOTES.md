@@ -1,8 +1,11 @@
-# ZIKO 1.0.9 maintenance revision
+# ZIKO 1.1.0 release notes
 
-This is a source revision based on the uploaded ZIKO 1.0.9 project. It is not declared stable.
+This release includes the 1.0.9 maintenance work and fixes managed-bot update handler registration for aiogram 3.34.0.
 
 ## Changes
+- Register `managed_bot` updates on the root `Dispatcher.update` observer. The tenant child router is not a root dispatcher and has no `.update` observer.
+- Pass the existing root dispatcher into tenant-router setup so managed-bot events are registered at the correct level.
+- Bump project/package/installed version markers to 1.1.0.
 - Installer and GitHub bootstrap installer now reject non-root execution immediately and show a `sudo bash ...` command.
 - Every `ziko` CLI invocation is root-only, including help/version commands; non-root gets a clear denial and `sudo ziko` instruction.
 - Installer prints the requested post-install management-panel instructions.
