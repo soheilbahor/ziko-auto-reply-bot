@@ -70,18 +70,33 @@ clear_code() {
 run_as_service_user() { runuser -u "$SERVICE_USER" -- "$@"; }
 
 install_requirements() {
-  "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check \
-    -q -r "$ROOT/requirements.txt"
-  (cd "$ROOT" && "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check .)
-
-  if ! "$ROOT/.venv/bin/python" -c 'from cryptography.fernet import Fernet' >/dev/null 2>&1; then
+  (
+    umask 022
     "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check \
-      --force-reinstall --no-cache-dir "cryptography>=42,<47"
+      -q -r "$ROOT/requirements.txt"
+    cd "$ROOT"
+    "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check .
+  )
+
+  local site_packages
+  site_packages="$("$ROOT/.venv/bin/python" -c \
+    'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+
+  chmod -R a+rX "$site_packages"
+
+  if ! run_as_service_user "$ROOT/.venv/bin/python" \
+      -c 'from cryptography.fernet import Fernet' >/dev/null 2>&1; then
+    (
+      umask 022
+      "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check \
+        --force-reinstall --no-cache-dir "cryptography>=42,<47"
+    )
+    chmod -R a+rX "$site_packages"
   fi
 
-  "$ROOT/.venv/bin/python" -c 'from cryptography.fernet import Fernet'
+  run_as_service_user "$ROOT/.venv/bin/python" \
+    -c 'from cryptography.fernet import Fernet'
 }
-
 rollback() {
   [[ "$ROLLING_BACK" -eq 0 ]] || return 0
   ROLLING_BACK=1
