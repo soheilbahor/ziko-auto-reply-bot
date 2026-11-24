@@ -78,12 +78,12 @@ Telegram Bot API (HTTPS، long polling)
 
 ### نصب یک‌خطی از GitHub
 
-ابتدا `OWNER/REPOSITORY` را با نام واقعی مخزن عمومی GitHub جایگزین کنید. این دستور
+ابتدا `soheilbahor/ziko-auto-reply-bot` را با نام واقعی مخزن عمومی GitHub جایگزین کنید. این دستور
 پیش‌نیازهای Ubuntu 24.04 را نصب می‌کند، آخرین Release را از GitHub دریافت می‌کند،
 SHA-256 فایل انتشار را بررسی می‌کند و سپس نصب‌کنندهٔ تعاملی را اجرا می‌کند:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/main/scripts/install-from-github.sh | sudo bash -s -- OWNER/REPOSITORY'
+sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- soheilbahor/ziko-auto-reply-bot'
 ```
 
 نصب‌کننده توکن ربات را با ورودی مخفی می‌گیرد؛ توکن در خط فرمان، لاگ یا فایل systemd
@@ -137,15 +137,15 @@ sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl c
 | `journalctl -u ziko -f` | مشاهدهٔ زندهٔ لاگ |
 | `sudo ziko backup` | پشتیبان‌گیری از پایگاه داده |
 | `sudo ziko restore فایل.sqlite3` | بازیابی پایگاه داده |
-| `sudo ziko update --repo OWNER/REPOSITORY [--version vX.Y.Z]` | به‌روزرسانی از Release |
+| `sudo ziko update --repo soheilbahor/ziko-auto-reply-bot [--version vX.Y.Z]` | به‌روزرسانی از Release |
 | `pytest -ra` | اجرای آزمون‌ها |
 
 ## به‌روزرسانی
 
 ```bash
-sudo ziko update --repo OWNER/REPOSITORY
+sudo ziko update --repo soheilbahor/ziko-auto-reply-bot
 # یا نسخهٔ مشخص:
-sudo ziko update --repo OWNER/REPOSITORY --version v1.0.0
+sudo ziko update --repo soheilbahor/ziko-auto-reply-bot --version v1.0.0
 ```
 
 اسکریپت به‌ترتیب:

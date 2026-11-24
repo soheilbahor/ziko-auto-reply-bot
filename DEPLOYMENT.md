@@ -87,7 +87,7 @@ active/inactive state.
 ## Update and rollback
 
 The GitHub updater (`scripts/update.sh`) downloads a tagged release and verifies the asset
-against `SHA256SUMS`. Configure the real repository using `--repo OWNER/REPOSITORY` or
+against `SHA256SUMS`. Configure the real repository using `--repo soheilbahor/ziko-auto-reply-bot` or
 `ZIKO_REPO`; placeholder values are intentionally rejected. The updater uses the same
 canonical database and backup directories. It preserves `.venv` and local legacy files while
 replacing application code and keeps bounded code snapshots.

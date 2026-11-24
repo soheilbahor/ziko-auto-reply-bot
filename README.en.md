@@ -54,12 +54,12 @@ See [`INTEGRATION_REPORT.md`](INTEGRATION_REPORT.md), [`MODULE1_CONTRACT.md`](MO
 
 ### One-command installation from GitHub
 
-Replace `OWNER/REPOSITORY` with the real public GitHub repository. This installs the
+Replace `soheilbahor/ziko-auto-reply-bot` with the real public GitHub repository. This installs the
 Ubuntu 24.04 prerequisites, downloads the latest GitHub Release, verifies the asset
 against `SHA256SUMS`, and launches the interactive installer:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/main/scripts/install-from-github.sh | sudo bash -s -- OWNER/REPOSITORY'
+sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- soheilbahor/ziko-auto-reply-bot'
 ```
 
 The installer reads the bot token without terminal echo. It does not put the token in
@@ -108,14 +108,14 @@ After installation, the `ziko` command manages the service; run `ziko --help` fo
 | `journalctl -u ziko -f` | Follow logs |
 | `sudo ziko backup` | Back up the database |
 | `sudo ziko restore FILE.sqlite3` | Restore the database |
-| `sudo ziko update --repo OWNER/REPOSITORY [--version vX.Y.Z]` | Update from a Release |
+| `sudo ziko update --repo soheilbahor/ziko-auto-reply-bot [--version vX.Y.Z]` | Update from a Release |
 | `pytest -ra` | Run the tests |
 
 ## Updating
 
 ```bash
-sudo ziko update --repo OWNER/REPOSITORY
-sudo ziko update --repo OWNER/REPOSITORY --version v1.0.0
+sudo ziko update --repo soheilbahor/ziko-auto-reply-bot
+sudo ziko update --repo soheilbahor/ziko-auto-reply-bot --version v1.0.0
 ```
 
 The script:
