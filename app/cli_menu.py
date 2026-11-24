@@ -230,11 +230,44 @@ def render_checks(checks: Sequence[tuple[str, str, str]]) -> None:
         ok("All checks passed.")
 
 
+def render_update_center(status: Mapping[str, object]) -> None:
+    current = str(status.get("current", "unknown"))
+    reachable = bool(status.get("reachable"))
+    stable = str(status.get("stable", "Unavailable")) or "Unavailable"
+    beta = str(status.get("beta", "Unavailable")) or "Unavailable"
+    available = bool(status.get("available"))
+    state = Text("● Update available", style="ok") if reachable and available else (
+        Text("● Up to date", style="ok") if reachable else Text("● Status unavailable", style="warn")
+    )
+    console.print(_grid("UPDATE", [
+        ("Currently installed", _format_version_badge(current) or current),
+        ("Latest stable", _format_version_badge(stable) if stable != "Unavailable" else stable),
+        ("Latest main / beta", beta),
+        ("Status", state),
+    ], style="#8b5cf6"))
+    console.print("[bold cyan]SELECT VERSION[/bold cyan]")
+    console.print("[1] Automatic  (latest stable release)")
+    console.print("[2] Choose a specific release version")
+    console.print("[3] Beta       (latest main branch - may be unstable)")
+    console.print("[0] Back to menu")
+
+
+def render_release_choices(releases: Sequence[tuple[str, str]]) -> None:
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan")
+    table.add_column("#", justify="right", style="accent")
+    table.add_column("Version")
+    table.add_column("Release")
+    for index, (tag, name) in enumerate(releases, 1):
+        table.add_row(str(index), tag, name)
+    console.print(Panel(table, title="Available Stable Releases", border_style="cyan"))
+
+
 def run_menu(
     actions: Mapping[str, Callable[[], int | None]],
     state_fn: Callable[[], str],
     version: str | Callable[[], str] = "",
     version_error_fn: Callable[[], str | None] | None = None,
+    update_status_fn: Callable[[], Mapping[str, object]] | None = None,
 ) -> int:
     """Interactive menu; version is refreshed on every render."""
     while True:
@@ -247,13 +280,25 @@ def run_menu(
             Text.assemble(("Service: ", "bold"), indicator(state_fn())),
             title="Dashboard", border_style="cyan", box=box.ROUNDED,
         ))
+        update = update_status_fn() if update_status_fn else {}
+        if update.get("reachable") and update.get("available"):
+            update_badge = Text.assemble(("● ", "ok"), (f"Update available · v{update.get('stable')}", "ok"))
+        elif update.get("reachable"):
+            update_badge = Text.assemble(("● ", "ok"), ("System up to date", "ok"))
+        else:
+            update_badge = Text.assemble(("● ", "warn"), ("Update status unavailable", "warn"))
+        console.print(Panel(update_badge, title="UPDATE", border_style="green" if update.get("reachable") and update.get("available") else "cyan", box=box.ROUNDED))
         for section, action_names in MENU_SECTIONS:
             table = Table.grid(padding=(0, 2))
             table.add_column(justify="right", style="accent")
             table.add_column()
             for key, label, name in MENU_ITEMS:
                 if name in action_names:
-                    table.add_row(key, Text(label, style="err" if name == "uninstall" else ""))
+                    if name == "update" and update.get("reachable") and update.get("available"):
+                        display = Text.assemble((label, "bold"), ("  ● UPDATE AVAILABLE", "ok"))
+                    else:
+                        display = Text(label, style="err" if name == "uninstall" else "")
+                    table.add_row(key, display)
             console.print(Panel(table, title=section, border_style="cyan", box=box.ROUNDED))
         console.print("[muted]0  Exit[/muted]")
         try:

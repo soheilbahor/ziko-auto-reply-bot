@@ -1,5 +1,11 @@
 # ZIKO Personal Assistant
 
+[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
+[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
+[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
+
+**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
+
 [English](README.en.md) · **فارسی**
 
 > دستیار شخصی پاسخ‌خودکار برای تلگرام، بر پایهٔ **Telegram Business** و **Bot API رسمی**.
@@ -78,12 +84,12 @@ Telegram Bot API (HTTPS، long polling)
 
 ### نصب یک‌خطی از GitHub
 
-ابتدا `soheilbahor/ziko-auto-reply-bot` را با نام واقعی مخزن عمومی GitHub جایگزین کنید. این دستور
+ابتدا `ziko-freedom/ziko-auto-reply-bot` را با نام واقعی مخزن عمومی GitHub جایگزین کنید. این دستور
 پیش‌نیازهای Ubuntu 24.04 را نصب می‌کند، آخرین Release را از GitHub دریافت می‌کند،
 SHA-256 فایل انتشار را بررسی می‌کند و سپس نصب‌کنندهٔ تعاملی را اجرا می‌کند:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- soheilbahor/ziko-auto-reply-bot'
+sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/ziko-freedom/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- ziko-freedom/ziko-auto-reply-bot'
 ```
 
 نصب‌کننده توکن ربات را با ورودی مخفی می‌گیرد؛ توکن در خط فرمان، لاگ یا فایل systemd
@@ -137,15 +143,21 @@ sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl c
 | `journalctl -u ziko -f` | مشاهدهٔ زندهٔ لاگ |
 | `sudo ziko backup` | پشتیبان‌گیری از پایگاه داده |
 | `sudo ziko restore فایل.sqlite3` | بازیابی پایگاه داده |
-| `sudo ziko update --repo soheilbahor/ziko-auto-reply-bot [--version vX.Y.Z]` | به‌روزرسانی از Release |
+| `sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot [--version vX.Y.Z]` | به‌روزرسانی از Release |
 | `pytest -ra` | اجرای آزمون‌ها |
 
 ## به‌روزرسانی
 
 ```bash
-sudo ziko update --repo soheilbahor/ziko-auto-reply-bot
+sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot
 # یا نسخهٔ مشخص:
-sudo ziko update --repo soheilbahor/ziko-auto-reply-bot --version v1.0.0
+
+[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
+[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
+[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
+
+**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
+sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot --version v1.0.0
 ```
 
 اسکریپت به‌ترتیب:
@@ -162,9 +174,21 @@ sudo ziko update --repo soheilbahor/ziko-auto-reply-bot --version v1.0.0
 
 ```bash
 # پشتیبان‌گیری (با SQLite Online Backup؛ سرویس می‌تواند روشن بماند)
+
+[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
+[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
+[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
+
+**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
 sudo ziko backup
 
 # بازیابی (سرویس را متوقف، DB فعلی را با پسوند .pre-restore.<زمان> نگه می‌دارد و راه‌اندازی می‌کند)
+
+[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
+[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
+[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
+
+**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
 sudo ziko restore /var/backups/ziko-assistant/ziko-YYYYMMDDTHHMMSSZ-XXXXXX.sqlite3
 ```
 

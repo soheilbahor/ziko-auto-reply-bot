@@ -1,5 +1,11 @@
 # ZIKO Personal Assistant
 
+[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
+[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
+[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
+
+**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
+
 **English** · [فارسی](README.md)
 
 > A personal auto-reply assistant built on **Telegram Business** and the **official Bot API**.
@@ -54,12 +60,12 @@ See [`INTEGRATION_REPORT.md`](INTEGRATION_REPORT.md), [`MODULE1_CONTRACT.md`](MO
 
 ### One-command installation from GitHub
 
-Replace `soheilbahor/ziko-auto-reply-bot` with the real public GitHub repository. This installs the
+Replace `ziko-freedom/ziko-auto-reply-bot` with the real public GitHub repository. This installs the
 Ubuntu 24.04 prerequisites, downloads the latest GitHub Release, verifies the asset
 against `SHA256SUMS`, and launches the interactive installer:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- soheilbahor/ziko-auto-reply-bot'
+sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/ziko-freedom/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- ziko-freedom/ziko-auto-reply-bot'
 ```
 
 The installer reads the bot token without terminal echo. It does not put the token in
@@ -122,7 +128,7 @@ After installation, the `ziko` command manages the service; run `ziko --help` fo
 | `journalctl -u ziko -f` | Follow logs |
 | `sudo ziko backup` | Back up the database |
 | `sudo ziko restore FILE.sqlite3` | Restore the database |
-| `sudo ziko update --repo soheilbahor/ziko-auto-reply-bot [--version vX.Y.Z]` | Update from a Release |
+| `sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot [--version vX.Y.Z]` | Update from a Release |
 | `pytest -ra` | Run the tests |
 
 ## Updating
@@ -139,8 +145,8 @@ Every update verifies the published SHA-256 checksum, snapshots the current code
 database, preserves local configuration/data/venv, and performs a service health check.
 
 ```bash
-sudo ziko update --repo soheilbahor/ziko-auto-reply-bot
-sudo ziko update --repo soheilbahor/ziko-auto-reply-bot --version v1.0.0
+sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot
+sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot --version v1.0.0
 ```
 
 The script:

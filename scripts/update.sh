@@ -7,7 +7,7 @@
 #   sudo scripts/update.sh                       # latest release
 #   sudo scripts/update.sh --version v1.2.0      # specific release
 #   sudo scripts/update.sh --channel stable      # latest stable (default)
-#   sudo scripts/update.sh --channel dev         # latest published -dev prerelease
+#   sudo scripts/update.sh --channel beta        # latest main-branch commit (unstable)
 #   sudo scripts/update.sh --check               # only report selected channel versions
 #   sudo scripts/update.sh --repo OWNER/REPOSITORY
 #
@@ -161,28 +161,25 @@ curl_get() {
 }
 
 resolve_latest_tag() {
-  if [[ "$CHANNEL" == "stable" ]]; then
-    local url
-    url="$(curl_get -I -o /dev/null -w '%{url_effective}' "$BASE_URL/$REPO/releases/latest")" \
-      || die "cannot resolve the latest stable release of $REPO"
-    printf '%s' "${url##*/}"
-    return
-  fi
+  local url
+  url="$(curl_get -I -o /dev/null -w '%{url_effective}' "$BASE_URL/$REPO/releases/latest")" \
+    || die "cannot resolve the latest stable release of $REPO"
+  printf '%s' "${url##*/}"
+}
+
+resolve_latest_beta_sha() {
   local api_url="${ZIKO_API_URL:-https://api.github.com}"
   curl_get -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    "$api_url/repos/$REPO/releases?per_page=100" -o "$WORK/releases.json" \
-    || die "cannot query GitHub releases for the dev channel"
-  python3 - "$WORK/releases.json" <<'PYCODE'
+    "$api_url/repos/$REPO/commits/main" -o "$WORK/main-commit.json" \
+    || die "cannot query the latest main-branch commit for beta"
+  python3 - "$WORK/main-commit.json" <<'PYCODE'
 import json, re, sys
-releases = json.load(open(sys.argv[1], encoding="utf-8"))
-pattern = re.compile(r"^v\d+\.\d+\.\d+-dev(?:[.-][0-9A-Za-z.-]+)?$")
-for release in releases:
-    tag = release.get("tag_name", "")
-    if release.get("prerelease") and pattern.fullmatch(tag) and not release.get("draft"):
-        print(tag)
-        raise SystemExit(0)
-raise SystemExit("No published Dev prerelease found. Publish a vX.Y.Z-dev.N prerelease first.")
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+sha = d.get("sha", "")
+if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+    raise SystemExit("GitHub main branch returned an invalid commit SHA")
+print(sha.lower())
 PYCODE
 }
 
@@ -200,7 +197,8 @@ main() {
 
   [[ "$EUID" -eq 0 ]] || die "run as root (sudo)"
   [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "invalid repository: $REPO"
-  [[ "$CHANNEL" == "stable" || "$CHANNEL" == "dev" ]] || die "channel must be stable or dev"
+  [[ "$CHANNEL" == "stable" || "$CHANNEL" == "beta" || "$CHANNEL" == "dev" ]] || die "channel must be stable or beta"
+  [[ "$CHANNEL" == "dev" ]] && CHANNEL="beta"
   [[ "$REPO" != "OWNER/REPOSITORY" ]] \
     || die "set the real repository: --repo <owner>/<repo> or ZIKO_REPO"
   local cmd
@@ -219,10 +217,15 @@ main() {
 
   WORK="$(mktemp -d)"
   trap cleanup EXIT
-  [[ -n "$TAG" ]] || TAG="$(resolve_latest_tag)"
-  [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "invalid version tag: $TAG"
-  if [[ "$CHANNEL" == "stable" && "$TAG" == *-* ]]; then die "stable channel cannot install a prerelease tag"; fi
-  if [[ "$CHANNEL" == "dev" && "$TAG" != *-dev* ]]; then die "dev channel requires a -dev prerelease tag"; fi
+  local BETA_SHA=""
+  if [[ "$CHANNEL" == "beta" ]]; then
+    [[ -z "$TAG" ]] || die "--version is only supported for stable releases; choose --channel stable"
+    BETA_SHA="$(resolve_latest_beta_sha)"
+    TAG="dev-${BETA_SHA:0:12}"
+  else
+    [[ -n "$TAG" ]] || TAG="$(resolve_latest_tag)"
+    [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid stable release tag: $TAG"
+  fi
   local current="unknown"
   [[ -f "$ROOT/VERSION" ]] && current="$(tr -d '[:space:]' < "$ROOT/VERSION")"
   current="${current#v}"
@@ -233,16 +236,26 @@ main() {
 
   local asset="$ASSET_PREFIX-$TAG.tar.gz"
   local rel_url="$BASE_URL/$REPO/releases/download/$TAG"
+  local api_url="${ZIKO_API_URL:-https://api.github.com}"
 
   # ---- download and verify (nothing is changed yet) ----
-  log "downloading $asset"
-  curl_get -o "$WORK/$asset" "$rel_url/$asset"
-  curl_get -o "$WORK/SHA256SUMS" "$rel_url/SHA256SUMS"
-  [[ "$(grep -cF -- "  $asset" "$WORK/SHA256SUMS")" -eq 1 ]] \
-    || die "SHA256SUMS has no unique entry for $asset"
-  (cd "$WORK" && grep -F -- "  $asset" SHA256SUMS | sha256sum -c --status -) \
-    || die "SHA-256 mismatch - refusing to install"
-  log "checksum OK"
+  if [[ "$CHANNEL" == "beta" ]]; then
+    log "downloading latest main-branch snapshot ($BETA_SHA)"
+    curl_get -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      -o "$WORK/$asset" "$api_url/repos/$REPO/tarball/$BETA_SHA"
+    printf '%s  %s\n' "$(sha256sum "$WORK/$asset" | awk '{print $1}')" "$asset" > "$WORK/SHA256SUMS"
+    log "beta snapshot downloaded over verified HTTPS; pinned commit: $BETA_SHA"
+  else
+    log "downloading $asset"
+    curl_get -o "$WORK/$asset" "$rel_url/$asset"
+    curl_get -o "$WORK/SHA256SUMS" "$rel_url/SHA256SUMS"
+    [[ "$(grep -cF -- "  $asset" "$WORK/SHA256SUMS")" -eq 1 ]] \
+      || die "SHA256SUMS has no unique entry for $asset"
+    (cd "$WORK" && grep -F -- "  $asset" SHA256SUMS | sha256sum -c --status -) \
+      || die "SHA-256 mismatch - refusing to install"
+    log "SHA-256 checksum OK"
+  fi
 
   if tar -tzf "$WORK/$asset" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
     die "archive contains unsafe paths"

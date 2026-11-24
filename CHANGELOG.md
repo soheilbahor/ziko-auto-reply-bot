@@ -1,3 +1,9 @@
+﻿## 1.0.9
+
+- Add professional CLI update center with stable, specific-release and beta channels.
+- Detect available GitHub releases and main-branch updates.
+- Update GitHub repository ownership and project documentation.
+- Improve update backup and rollback handling.
 # Changelog
 
 ## 1.0.8
@@ -35,3 +41,4 @@ versions follow [Semantic Versioning](https://semver.org/). Release tags look li
 - `scripts/backup.sh`, `scripts/restore.sh`, `deploy/ziko.service`.
 
 <!-- Move the items above under "## [1.0.0] - YYYY-MM-DD" when releasing; the release workflow reads that section for the release notes. -->
+

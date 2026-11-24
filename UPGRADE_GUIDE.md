@@ -13,7 +13,7 @@ The first upgrade from the older 1.0.6 updater should have a full-platform backu
 
 ```bash
 sudo curl -fsSL \
-  https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/backup.sh \
+  https://raw.githubusercontent.com/ziko-freedom/ziko-auto-reply-bot/main/scripts/backup.sh \
   -o /tmp/ziko-platform-backup.sh
 sudo bash /tmp/ziko-platform-backup.sh
 ```

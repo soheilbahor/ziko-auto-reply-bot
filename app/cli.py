@@ -8,6 +8,7 @@ redacted from every command output that passes through it.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -16,12 +17,16 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
 
 HOME = Path(os.environ.get("ZIKO_HOME", "/opt/ziko-assistant"))
 SERVICE = os.environ.get("ZIKO_SERVICE", "ziko")
 SERVICE_USER = "ziko"
+GITHUB_REPO = os.environ.get("ZIKO_REPO", "ziko-freedom/ziko-auto-reply-bot")
+_UPDATE_STATUS_CACHE: tuple[float, dict[str, str | bool]] | None = None
 
 _TOKEN_RE = re.compile(r"\d{6,}:[A-Za-z0-9_-]{20,}")
 _TOKEN_FORMAT = re.compile(r"[0-9]+:[A-Za-z0-9_-]{20,}")
@@ -71,6 +76,63 @@ def _version_error() -> str | None:
     except RuntimeError as exc:
         return str(exc)
     return None
+
+
+def _github_json(path: str, timeout: float = 2.5):
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}/{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "ZIKO-CLI-Update-Checker",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def update_status(force: bool = False) -> dict[str, str | bool]:
+    """Return cached GitHub stable/dev update metadata; never blocks the menu for long."""
+    global _UPDATE_STATUS_CACHE
+    now = time.monotonic()
+    if not force and _UPDATE_STATUS_CACHE and now - _UPDATE_STATUS_CACHE[0] < 300:
+        return dict(_UPDATE_STATUS_CACHE[1])
+    current = _version()
+    result: dict[str, str | bool] = {
+        "current": current, "stable": "", "beta": "",
+        "available": False, "reachable": False,
+    }
+    try:
+        release = _github_json("releases/latest")
+        tag = str(release.get("tag_name", ""))
+        if not re.fullmatch(r"v\d+\.\d+\.\d+", tag) or release.get("draft"):
+            raise ValueError("GitHub latest release has an invalid stable tag")
+        commit = _github_json("commits/main")
+        sha = str(commit.get("sha", ""))
+        if not _SHA_RE.fullmatch(sha):
+            raise ValueError("GitHub main branch returned an invalid commit SHA")
+        stable = tag.removeprefix("v")
+        beta = f"dev-{sha[:12].lower()}"
+        result.update({
+            "stable": stable, "beta": beta, "reachable": True,
+            "available": current != stable,
+        })
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, urllib.error.URLError):
+        result["reachable"] = False
+    _UPDATE_STATUS_CACHE = (now, result)
+    return dict(result)
+
+
+def available_stable_releases(limit: int = 20) -> list[tuple[str, str]]:
+    releases = _github_json(f"releases?per_page={max(1, min(limit, 100))}")
+    rows: list[tuple[str, str]] = []
+    for release in releases:
+        tag = str(release.get("tag_name", ""))
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        if re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+            rows.append((tag, str(release.get("name") or tag)))
+    return rows
 
 
 def _ui():
@@ -470,25 +532,25 @@ def cmd_update(
     script = _script("update.sh")
     if not script:
         return 1
-    if channel not in {"stable", "dev"}:
-        ui.error("Update channel must be stable or dev.")
+    if channel == "dev":
+        channel = "beta"
+    if channel not in {"stable", "beta"}:
+        ui.error("Update channel must be stable or beta.")
         return 2
-    command = ["bash", str(script), "--channel", channel]
-    if repo:
-        command += ["--repo", repo]
+    command = ["bash", str(script), "--channel", channel, "--repo", repo or GITHUB_REPO]
     if version:
         command += ["--version", version]
     if check:
         command.append("--check")
         return _inherit(_privileged(command))
-    if not yes and not ui.confirm(f"Update ZIKO from the {channel} channel?", default=True):
-        ui.info("Cancelled.")
-        return 1
+    # Update Center is intentionally one-choice-to-install: no second confirmation prompt.
     rc = _inherit(_privileged(command))
     if rc != 0:
-        ui.error("Update failed.")
+        ui.error("Update failed. The updater should have rolled back automatically; inspect service logs.")
         return rc
     ui.ok("Update completed.")
+    global _UPDATE_STATUS_CACHE
+    _UPDATE_STATUS_CACHE = None
     return cmd_status()
 
 
@@ -747,8 +809,8 @@ def _build_parser() -> argparse.ArgumentParser:
     upd.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     upd.add_argument("--repo", help="GitHub repository in OWNER/REPOSITORY format")
     upd.add_argument("--version", help="Release tag, e.g. v1.2.3")
-    upd.add_argument("--channel", choices=("stable", "dev"), default="stable",
-                     help="Release channel (default: stable)")
+    upd.add_argument("--channel", choices=("stable", "beta", "dev"), default="stable",
+                     help="Stable release or latest main-branch beta")
     upd.add_argument("--check", action="store_true", help="Check the selected channel without updating")
     bots = sub.add_parser("bots", help="List and inspect registered child bots")
     bots_sub = bots.add_subparsers(dest="bots_command")
@@ -780,18 +842,41 @@ def _interactive() -> int:
         return rc
 
     def update_center() -> int:
-        channel = (ui.ask("Update channel (stable/dev) [stable]") or "stable").strip().lower()
-        if channel not in {"stable", "dev"}:
-            ui.error("Choose either stable or dev.")
-            return 2
-        ui.info(f"Checking the {channel} channel before making changes...")
-        rc = cmd_update(channel=channel, check=True)
-        if rc != 0:
-            return rc
-        if not ui.confirm(f"Install the available {channel} release?", default=True):
-            ui.info("Update cancelled; no files were changed.")
+        status = update_status(force=True)
+        ui.render_update_center(status)
+        choice = ui.ask("Select [0-3]").strip()
+        if choice == "0" or not choice:
             return 0
-        return cmd_update(yes=True, channel=channel)
+        if choice == "1":
+            if not status.get("reachable"):
+                ui.error("GitHub could not be reached. No files were changed.")
+                return 1
+            return cmd_update(yes=True, channel="stable")
+        if choice == "2":
+            try:
+                releases = available_stable_releases()
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, urllib.error.URLError) as exc:
+                ui.error(f"Could not retrieve stable releases: {exc}")
+                return 1
+            if not releases:
+                ui.warn("No published stable releases were found.")
+                return 1
+            ui.render_release_choices(releases)
+            selected = ui.ask("Release number (0 = back)").strip()
+            if selected == "0" or not selected:
+                return 0
+            if not selected.isdigit() or not 1 <= int(selected) <= len(releases):
+                ui.error("Invalid release selection.")
+                return 2
+            return cmd_update(yes=True, version=releases[int(selected) - 1][0], channel="stable")
+        if choice == "3":
+            if not status.get("reachable"):
+                ui.error("GitHub could not be reached. No files were changed.")
+                return 1
+            return cmd_update(yes=True, channel="beta")
+        ui.error("Choose 0, 1, 2, or 3.")
+        return 2
+
 
     actions = {
         "status": cmd_status, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
@@ -800,7 +885,7 @@ def _interactive() -> int:
         "version": cmd_version, "help": cmd_help, "bots": cmd_bots_list,
         "uninstall": cmd_uninstall,
     }
-    return ui.run_menu(actions, service_state, version=_version, version_error_fn=_version_error)
+    return ui.run_menu(actions, service_state, version=_version, version_error_fn=_version_error, update_status_fn=update_status)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
