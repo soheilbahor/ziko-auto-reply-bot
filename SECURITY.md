@@ -109,3 +109,10 @@ These cannot be proven by unit tests and must be checked on the server and recor
 2. Unexpected replies sent: disable auto-reply from the admin panel (or stop the service), then
    inspect delivery metadata by connection id, chat id and session id.
 3. Suspected unauthorized admin access: verify `ADMIN_IDS`, rotate the token, review logs.
+
+
+## Child bot tokens and tenant isolation
+
+Child bot tokens are encrypted at rest with Fernet. The key is generated on first startup at `tenant-token.key` beside the configured database directory and is restricted to mode `0600`; the service account must retain exclusive access. Back up this key together with `tenants.sqlite3` and every database in `tenants/`. If the key is lost, encrypted tokens cannot be recovered. Never include the key or tenant database files in GitHub releases or support logs.
+
+Each child bot has a separate SQLite database file and its own admin allow-list containing only the registering Telegram user ID. The master bot stores only tenant metadata and encrypted child bot tokens. The current multi-bot runtime uses one long-polling task per child bot in one service process; it is an initial single-server design, not a claim of unlimited scale or multi-host failover.

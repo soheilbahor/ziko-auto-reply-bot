@@ -7,6 +7,9 @@ versions follow [Semantic Versioning](https://semver.org/). Release tags look li
 ## [Unreleased]
 
 ### Added
+- Multi-tenant child-bot MVP: one child bot per Telegram user, BotFather token validation, Fernet-encrypted token registry, per-tenant SQLite databases and independent polling runtimes.
+- Telegram Business support for each child bot using the existing rule/status-based reply engine.
+- Master commands to list, disable and re-enable child bots; supervised polling retries with backoff.
 - GitHub preparation: Persian `README.md`, `README.en.md`, `CHANGELOG.md`, hardened `.gitignore`.
 - `.github/workflows/ci.yml`: Python 3.12, project dependencies, pytest (strict), Ruff, `bash -n`, ShellCheck, and a guard against tracked secrets/databases/backups.
 - `.github/workflows/release.yml`: on `vX.Y.Z` tags, builds `.zip`, `.tar.gz` and `SHA256SUMS` release assets.

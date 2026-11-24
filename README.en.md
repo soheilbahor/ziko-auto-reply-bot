@@ -164,3 +164,11 @@ CI (`.github/workflows/ci.yml`) runs on Python 3.12 with the project's real depe
 ## License
 
 **No license has been chosen yet.** Until the repository owner approves one and adds a `LICENSE` file, all rights are reserved.
+
+## Multi-tenant child bots (initial implementation)
+
+A Telegram user can register exactly one child bot by creating it with `@BotFather`, then sending its token to the master bot using `/create_bot`. ZIKO validates the token with Telegram, stores it encrypted using Fernet, and starts an isolated polling runtime. The encryption key is stored beside the registry database as `tenant-token.key` with mode `0600`; back up that key together with `tenants.sqlite3` and the `tenants/` directory. Losing the key makes stored child bot tokens unrecoverable.
+
+Each child bot has a separate SQLite database and only its owner is authorized to use its admin panel. To enable Telegram Business replies, the owner must connect that child bot under Telegram Settings → Telegram Business → Chatbots and grant reply permission. The master owner can use `/tenants`, `/tenant_disable USER_ID`, and `/tenant_enable USER_ID`.
+
+This first implementation is a single-server, single-process deployment. Large-scale or multi-server operation requires a distributed worker/supervisor design and a shared queue/database before being advertised as horizontally scalable.
