@@ -37,34 +37,34 @@ _GLYPHS = {
     "K": ("██  ██", "██ ██ ", "████  ", "██ ██ ", "██  ██"),
     "O": (" ████ ", "██  ██", "██  ██", "██  ██", " ████ "),
 }
-_TAGLINE = "دستیار شخصی پاسخ‌خودکار تلگرام بیزینس"
+_TAGLINE = "Telegram Business auto-reply assistant"
 
 # state -> (label, style)
 _STATES = {
-    "active": ("فعال", "ok"),
-    "activating": ("در حال راه‌اندازی", "warn"),
-    "reloading": ("در حال بارگذاری", "warn"),
-    "deactivating": ("در حال توقف", "warn"),
-    "inactive": ("متوقف", "err"),
-    "failed": ("خطا (failed)", "err"),
-    "not-found": ("نصب نشده", "err"),
-    "unknown": ("نامشخص", "warn"),
+    "active": ("Active", "ok"),
+    "activating": ("Starting", "warn"),
+    "reloading": ("Reloading", "warn"),
+    "deactivating": ("Stopping", "warn"),
+    "inactive": ("Inactive", "err"),
+    "failed": ("Failed", "err"),
+    "not-found": ("Not installed", "err"),
+    "unknown": ("Unknown", "warn"),
 }
 _LEVELS = {"ok": ("✔", "ok"), "warn": ("!", "warn"), "fail": ("✘", "err")}
 
 MENU_ITEMS: Sequence[tuple[str, str, str]] = (
-    ("1", "وضعیت سرویس", "status"),
-    ("2", "شروع سرویس", "start"),
-    ("3", "توقف سرویس", "stop"),
-    ("4", "راه‌اندازی مجدد", "restart"),
-    ("5", "مشاهده لاگ‌ها", "logs"),
-    ("6", "پشتیبان‌گیری", "backup"),
-    ("7", "بازیابی از پشتیبان", "restore"),
-    ("8", "به‌روزرسانی", "update"),
-    ("9", "تنظیمات", "config"),
-    ("10", "عیب‌یابی (doctor)", "doctor"),
-    ("11", "نسخه", "version"),
-    ("12", "حذف ZIKO", "uninstall"),
+    ("1", "Service status", "status"),
+    ("2", "Start service", "start"),
+    ("3", "Stop service", "stop"),
+    ("4", "Restart service", "restart"),
+    ("5", "View logs", "logs"),
+    ("6", "Backup", "backup"),
+    ("7", "Restore backup", "restore"),
+    ("8", "Update", "update"),
+    ("9", "Configuration", "config"),
+    ("10", "Diagnostics (doctor)", "doctor"),
+    ("11", "Version", "version"),
+    ("12", "Uninstall ZIKO", "uninstall"),
 )
 
 
@@ -126,7 +126,7 @@ def confirm(question: str, default: bool = False) -> bool:
     answer = answer.strip().lower()
     if not answer:
         return default
-    return answer in {"y", "yes", "ب", "بله"}
+    return answer in {"y", "yes"}
 
 
 def ask(question: str) -> str:
@@ -146,19 +146,19 @@ def _grid(title: str, rows: Sequence[tuple[str, str | Text]], style: str = "cyan
 
 
 def render_status(rows: Sequence[tuple[str, str | Text]]) -> None:
-    console.print(_grid("وضعیت ZIKO", rows))
+    console.print(_grid("ZIKO Status", rows))
 
 
 def render_config(path: str, rows: Sequence[tuple[str, str | Text]]) -> None:
-    console.print(_grid(f"تنظیمات  ·  {path}", rows, style="#8b5cf6"))
+    console.print(_grid(f"Configuration  ·  {path}", rows, style="#8b5cf6"))
 
 
 def render_checks(checks: Sequence[tuple[str, str, str]]) -> None:
     """checks: (level ok|warn|fail, title, detail)."""
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", show_edge=False)
     table.add_column("", width=1, no_wrap=True)
-    table.add_column("بررسی")
-    table.add_column("جزئیات", overflow="fold")
+    table.add_column("Check")
+    table.add_column("Details", overflow="fold")
     for level, title, detail in checks:
         mark, style = _LEVELS[level]
         table.add_row(Text(mark, style=style), title, Text(detail, style="muted"))
@@ -166,11 +166,11 @@ def render_checks(checks: Sequence[tuple[str, str, str]]) -> None:
     fails = sum(1 for c in checks if c[0] == "fail")
     warns = sum(1 for c in checks if c[0] == "warn")
     if fails:
-        error(f"{fails} مشکل جدی و {warns} هشدار پیدا شد.")
+        error(f"Found {fails} critical issue(s) and {warns} warning(s).")
     elif warns:
-        warn(f"سیستم کار می‌کند اما {warns} هشدار وجود دارد.")
+        warn(f"System is running, but {warns} warning(s) remain.")
     else:
-        ok("همه بررسی‌ها موفق بود.")
+        ok("All checks passed.")
 
 
 def run_menu(
@@ -183,18 +183,18 @@ def run_menu(
         if console.is_terminal:
             console.clear()
         print_logo(version)
-        console.print(Text.assemble(("وضعیت سرویس: ", "bold"), indicator(state_fn())))
+        console.print(Text.assemble(("Service status: ", "bold"), indicator(state_fn())))
         console.print()
         table = Table.grid(padding=(0, 2))
         table.add_column(justify="right", style="accent")
         table.add_column()
         for key, label, name in MENU_ITEMS:
             table.add_row(key, Text(label, style="err" if name == "uninstall" else ""))
-        table.add_row("0", Text("خروج", style="muted"))
-        console.print(Panel(table, title="منوی ZIKO", title_align="left",
+        table.add_row("0", Text("Exit", style="muted"))
+        console.print(Panel(table, title="ZIKO Menu", title_align="left",
                             border_style="cyan", box=box.ROUNDED))
         try:
-            choice = console.input(Text.assemble(("❯ ", "accent"), "شماره گزینه: ")).strip()
+            choice = console.input(Text.assemble(("❯ ", "accent"), "Select an option: ")).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             return 0
@@ -202,7 +202,7 @@ def run_menu(
             return 0
         name = next((n for k, _, n in MENU_ITEMS if k == choice), None)
         if name is None or name not in actions:
-            warn("گزینه نامعتبر است.")
+            warn("Invalid option.")
             console.input(Text("Enter ↵", style="muted"))
             continue
         console.print()
@@ -210,9 +210,9 @@ def run_menu(
             actions[name]()
         except KeyboardInterrupt:
             console.print()
-            info("بازگشت به منو.")
+            info("Returning to menu.")
         try:
-            console.input(Text("\nبرای بازگشت به منو Enter بزنید ↵ ", style="muted"))
+            console.input(Text("\nPress Enter to return to the menu ↵ ", style="muted"))
         except (EOFError, KeyboardInterrupt):
             console.print()
             return 0

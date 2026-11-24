@@ -135,7 +135,7 @@ def _stream(cmd: list[str]) -> int:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, errors="replace", bufsize=1)
     except FileNotFoundError:
-        _ui().error(f"دستور پیدا نشد: {cmd[0]}")
+        _ui().error(f"Command not found: {cmd[0]}")
         return 127
     try:
         assert proc.stdout is not None
@@ -153,7 +153,7 @@ def _inherit(cmd: list[str]) -> int:
     try:
         return subprocess.run(cmd, check=False).returncode
     except FileNotFoundError:
-        _ui().error(f"دستور پیدا نشد: {cmd[0]}")
+        _ui().error(f"Command not found: {cmd[0]}")
         return 127
 
 
@@ -161,7 +161,7 @@ def _script(name: str) -> Path | None:
     path = _scripts_dir() / name
     if path.is_file():
         return path
-    _ui().error(f"اسکریپت پیدا نشد: {path}")
+    _ui().error(f"Script not found: {path}")
     return None
 
 
@@ -179,9 +179,9 @@ def _human_duration(seconds: float) -> str:
     d, s = divmod(s, 86400)
     h, s = divmod(s, 3600)
     m = s // 60
-    parts = [f"{d} روز" if d else "", f"{h} ساعت" if h else "", f"{m} دقیقه" if m and not d else ""]
+    parts = [f"{d} days" if d else "", f"{h} hours" if h else "", f"{m} minutes" if m and not d else ""]
     parts = [p for p in parts if p]
-    return " و ".join(parts[:2]) or "کمتر از یک دقیقه"
+    return ", ".join(parts[:2]) or "Less than a minute"
 
 
 # ----------------------------------------------------------------------- systemd info
@@ -230,43 +230,43 @@ def cmd_status() -> int:
     info = service_info()
     state = service_state(info)
     values, env_problem = _read_env()
-    rows: list[tuple[str, object]] = [("سرویس", ui.indicator(state))]
+    rows: list[tuple[str, object]] = [("Service", ui.indicator(state))]
 
     boot = info.get("UnitFileState", "")
     if boot:
-        rows.append(("اجرا هنگام بوت", "فعال" if boot == "enabled" else boot))
+        rows.append(("Enabled at boot", "Enabled" if boot == "enabled" else boot))
     mono = info.get("ActiveEnterTimestampMonotonic", "0")
     if state == "active" and mono.isdigit() and int(mono) > 0:
-        rows.append(("مدت فعالیت", _human_duration(time.monotonic() - int(mono) / 1e6)))
+        rows.append(("Uptime", _human_duration(time.monotonic() - int(mono) / 1e6)))
     if info.get("MainPID", "0") not in {"", "0"}:
         rows.append(("PID", info["MainPID"]))
     mem = info.get("MemoryCurrent", "")
     if mem.isdigit() and int(mem) < 2**63:
-        rows.append(("حافظه", _human_size(int(mem))))
+        rows.append(("Memory", _human_size(int(mem))))
     if info.get("NRestarts", "0") not in {"", "0"}:
-        rows.append(("تعداد ری‌استارت", info["NRestarts"]))
+        rows.append(("Restart count", info["NRestarts"]))
 
     if env_problem == "missing":
-        rows.append(("تنظیمات", "فایل .env پیدا نشد"))
+        rows.append(("Configuration", ".env file not found"))
     elif env_problem == "denied":
-        rows.append(("تنظیمات", "نیاز به دسترسی (با sudo اجرا کنید)"))
+        rows.append(("Configuration", "Permission denied (run with sudo)"))
     else:
         token = (values or {}).get("BOT_TOKEN", "")
         good = bool(_TOKEN_FORMAT.fullmatch(token))
-        rows.append(("توکن ربات", "تنظیم شده" if good else "تنظیم نشده یا نامعتبر"))
+        rows.append(("Bot token", "Configured" if good else "Not configured or invalid"))
     try:
         size = _db_path(values).stat().st_size
-        rows.append(("پایگاه داده", _human_size(size)))
+        rows.append(("Database", _human_size(size)))
     except FileNotFoundError:
-        rows.append(("پایگاه داده", "هنوز ساخته نشده"))
+        rows.append(("Database", "Not created yet"))
     except PermissionError:
-        rows.append(("پایگاه داده", "نیاز به دسترسی"))
+        rows.append(("Database", "Permission denied"))
     mtime, problem = _last_backup()
     if mtime:
-        rows.append(("آخرین پشتیبان", f"{_human_duration(time.time() - mtime)} پیش"))
+        rows.append(("Last backup", f"{_human_duration(time.time() - mtime)} ago"))
     else:
-        rows.append(("آخرین پشتیبان", "نیاز به دسترسی" if problem == "denied" else "ندارد"))
-    rows.append(("نسخه", _version()))
+        rows.append(("Last backup", "Permission denied" if problem == "denied" else "None"))
+    rows.append(("Version", _version()))
     ui.render_status(rows)  # type: ignore[arg-type]
     return 0 if state == "active" else 3
 
@@ -286,30 +286,30 @@ def _wait_for(target: str, timeout: float = 12.0) -> bool:
 def _systemctl_action(action: str) -> int:
     ui = _ui()
     if not shutil.which("systemctl"):
-        ui.error("systemctl روی این سیستم در دسترس نیست.")
+        ui.error("systemctl is not available on this system.")
         return 1
-    labels = {"start": "شروع", "stop": "توقف", "restart": "راه‌اندازی مجدد"}
+    labels = {"start": "Start", "stop": "Stop", "restart": "Restart"}
     state = service_state()
     if state == "not-found":
-        ui.error("سرویس ziko نصب نشده است.")
+        ui.error("The ziko service is not installed.")
         return 1
     if action == "start" and state == "active":
-        ui.info("سرویس از قبل فعال است.")
+        ui.info("The service is already active.")
         return 0
     if action == "stop" and state in {"inactive", "failed"}:
-        ui.info("سرویس از قبل متوقف است.")
+        ui.info("The service is already stopped.")
         return 0
     rc = _inherit(_privileged(["systemctl", action, SERVICE]))
     if rc != 0:
-        ui.error(f"{labels[action]} سرویس ناموفق بود.")
+        ui.error(f"Failed to {action} the service.")
         return rc
     target = "inactive" if action == "stop" else "active"
-    with ui.console.status(f"{labels[action]} سرویس..."):
+    with ui.console.status(f"{labels[action]} service..."):
         reached = _wait_for(target)
     if reached:
-        ui.ok(f"سرویس {'متوقف شد' if action == 'stop' else 'فعال است'}.")
+        ui.ok(f"Service {'stopped' if action == 'stop' else 'is active'}.")
         return 0
-    ui.error("سرویس به وضعیت مورد انتظار نرسید. برای بررسی: ziko logs")
+    ui.error("The service did not reach the expected state. Check: ziko logs")
     return 1
 
 
@@ -356,9 +356,9 @@ def cmd_backup() -> int:
         return 1
     rc = _stream(_as_service_user(["bash", str(script)]))
     if rc == 0:
-        ui.ok("پشتیبان‌گیری انجام شد.")
+        ui.ok("Backup completed.")
     else:
-        ui.error("پشتیبان‌گیری ناموفق بود.")
+        ui.error("Backup failed.")
     return rc
 
 
@@ -366,28 +366,28 @@ def cmd_restore(file: str, yes: bool = False) -> int:
     ui = _ui()
     path = Path(file).expanduser().resolve()
     if not path.is_file():
-        ui.error(f"فایل پشتیبان پیدا نشد: {path}")
+        ui.error(f"Backup file not found: {path}")
         return 2
     try:
         with path.open("rb") as fh:
             if fh.read(16) != _SQLITE_MAGIC:
-                ui.error("این فایل یک پایگاه‌داده SQLite معتبر نیست.")
+                ui.error("This file is not a valid SQLite database.")
                 return 2
     except PermissionError:
-        ui.warn("امکان بررسی فایل نیست (دسترسی ندارید)؛ اسکریپت بازیابی بررسی می‌کند.")
+        ui.warn("Cannot inspect the file (permission denied); the restore script will validate it.")
     script = _script("restore.sh")
     if not script:
         return 1
-    ui.warn("پایگاه داده فعلی جایگزین می‌شود (یک نسخه .pre-restore ذخیره می‌ماند) "
-            "و سرویس چند ثانیه متوقف خواهد شد.")
-    if not yes and not ui.confirm(f"بازیابی از {path.name} انجام شود؟"):
-        ui.info("لغو شد.")
+    ui.warn("The current database will be replaced (a .pre-restore copy will be kept) "
+            "and the service will be stopped briefly.")
+    if not yes and not ui.confirm(f"Restore from {path.name}?"):
+        ui.info("Cancelled.")
         return 1
     rc = _stream(_privileged(["bash", str(script), *(["--yes"] if yes else []), str(path)]))
     if rc != 0:
-        ui.error("بازیابی ناموفق بود.")
+        ui.error("Restore failed.")
         return rc
-    ui.ok("بازیابی انجام شد.")
+    ui.ok("Restore completed.")
     return 0 if _wait_for("active") else 1
 
 
@@ -396,8 +396,8 @@ def cmd_update(yes: bool = False, repo: str | None = None, version: str | None =
     script = _script("update.sh")
     if not script:
         return 1
-    if not yes and not ui.confirm("ZIKO به‌روزرسانی شود؟", default=True):
-        ui.info("لغو شد.")
+    if not yes and not ui.confirm("Update ZIKO?", default=True):
+        ui.info("Cancelled.")
         return 1
     command = ["bash", str(script)]
     if repo:
@@ -406,9 +406,9 @@ def cmd_update(yes: bool = False, repo: str | None = None, version: str | None =
         command += ["--version", version]
     rc = _inherit(_privileged(command))
     if rc != 0:
-        ui.error("به‌روزرسانی ناموفق بود.")
+        ui.error("Update failed.")
         return rc
-    ui.ok("به‌روزرسانی انجام شد.")
+    ui.ok("Update completed.")
     return cmd_status()
 
 
@@ -417,13 +417,13 @@ def cmd_uninstall(yes: bool = False) -> int:
     script = _script("uninstall.sh")
     if not script:
         return 1
-    ui.warn("با حذف ZIKO سرویس متوقف می‌شود و داده‌ها طبق اسکریپت حذف پاک می‌شوند.")
+    ui.warn("Uninstalling ZIKO will stop the service and remove data according to the uninstall script.")
     if not yes:
-        if ui.confirm("پیش از حذف، پشتیبان‌گیری شود؟", default=True) and cmd_backup() != 0:
-            ui.error("حذف متوقف شد زیرا پشتیبان‌گیری ناموفق بود.")
+        if ui.confirm("Create a backup before uninstalling?", default=True) and cmd_backup() != 0:
+            ui.error("Uninstall cancelled because backup failed.")
             return 1
-        if ui.ask("برای تأیید کلمه uninstall را تایپ کنید") != "uninstall":
-            ui.info("لغو شد.")
+        if ui.ask("Type uninstall to confirm") != "uninstall":
+            ui.info("Cancelled.")
             return 1
     return _inherit(_privileged(["bash", str(script), *(["--yes"] if yes else [])]))
 
@@ -432,20 +432,20 @@ def _config_rows(values: dict[str, str]) -> list[tuple[str, object]]:
     ui = _ui()
     token = values.get("BOT_TOKEN", "")
     if not token:
-        token_cell = "تنظیم نشده"
+        token_cell = "Not configured"
     else:
         good = bool(_TOKEN_FORMAT.fullmatch(token))
-        token_cell = "•••••••• (تنظیم شده" + ("، فرمت معتبر)" if good else "، فرمت نامعتبر!)")
+        token_cell = "•••••••• (configured" + (", valid format)" if good else ", invalid format!)")
     ids = [x for x in re.split(r"[,;\s]+", values.get("ADMIN_IDS", "")) if x]
     rows: list[tuple[str, object]] = [
         ("BOT_TOKEN", token_cell),
-        ("ADMIN_IDS", f"{len(ids)} مدیر" if ids else "تنظیم نشده"),
-        ("DATABASE_PATH", values.get("DATABASE_PATH") or "/var/lib/ziko-assistant/ziko.sqlite3 (پیش‌فرض)"),
-        ("LOG_LEVEL", values.get("LOG_LEVEL") or "INFO (پیش‌فرض)"),
+        ("ADMIN_IDS", f"{len(ids)} admin(s)" if ids else "Not configured"),
+        ("DATABASE_PATH", values.get("DATABASE_PATH") or "/var/lib/ziko-assistant/ziko.sqlite3 (default)"),
+        ("LOG_LEVEL", values.get("LOG_LEVEL") or "INFO (default)"),
     ]
     for key in values:
         if key not in {"BOT_TOKEN", "ADMIN_IDS", "DATABASE_PATH", "LOG_LEVEL"}:
-            rows.append((key, "تنظیم شده (مقدار مخفی)"))
+            rows.append((key, "Configured (value hidden)"))
     return rows
 
 
@@ -458,23 +458,23 @@ def cmd_config(edit: bool = False) -> int:
         else:
             rc = _inherit(["sudoedit", str(_env_path())])
         if rc == 0:
-            ui.ok("ذخیره شد. برای اعمال تغییرات: ziko restart")
+            ui.ok("Saved. Apply changes with: ziko restart")
         return rc
     values, problem = _read_env()
     if problem == "missing":
-        ui.error(f"فایل تنظیمات پیدا نشد: {_env_path()}")
+        ui.error(f"Configuration file not found: {_env_path()}")
         return 1
     if problem == "denied":
-        ui.error("اجازه خواندن .env را ندارید. با sudo اجرا کنید: sudo ziko config")
+        ui.error("Cannot read .env. Run with sudo: sudo ziko config")
         return 1
     ui.render_config(str(_env_path()), _config_rows(values or {}))  # type: ignore[arg-type]
     try:
         mode = _env_path().stat().st_mode & 0o777
         if mode & 0o027:
-            ui.warn(f"دسترسی فایل تنظیمات برابر {mode:o} است؛ باید root:ziko با حالت 640 باشد.")
+            ui.warn(f"Configuration permissions are {mode:o}; expected root:ziko with mode 640.")
     except OSError:
         pass
-    ui.info("برای ویرایش: ziko config --edit  (توکن هیچ‌وقت نمایش داده نمی‌شود)")
+    ui.info("To edit: ziko config --edit (the token is never displayed)")
     return 0
 
 
@@ -485,33 +485,33 @@ def run_checks() -> list[tuple[str, str, str]]:
         checks.append((level, title, detail))
 
     v = sys.version_info
-    add("ok" if v[:2] == (3, 12) else "fail", "نسخه Python",
-        f"{v.major}.{v.minor}.{v.micro}" + ("" if v[:2] == (3, 12) else " (نیاز به Python 3.12)"))
-    add("ok" if HOME.is_dir() else "fail", "پوشه برنامه", str(HOME))
+    add("ok" if v[:2] == (3, 12) else "fail", "Python version",
+        f"{v.major}.{v.minor}.{v.micro}" + ("" if v[:2] == (3, 12) else " (Python 3.12 required)"))
+    add("ok" if HOME.is_dir() else "fail", "Application directory", str(HOME))
     venv_py = HOME / ".venv" / "bin" / "python"
-    add("ok" if os.access(venv_py, os.X_OK) else "fail", "محیط مجازی (venv)", str(venv_py))
+    add("ok" if os.access(venv_py, os.X_OK) else "fail", "Virtual environment (venv)", str(venv_py))
 
     values, problem = _read_env()
     if problem == "missing":
-        add("fail", "فایل .env", "پیدا نشد")
+        add("fail", ".env file", "Not found")
     elif problem == "denied":
-        add("warn", "فایل .env", "دسترسی خواندن ندارید؛ با sudo اجرا کنید")
+        add("warn", ".env file", "Read permission denied; run with sudo")
     else:
         mode = _env_path().stat().st_mode & 0o777
-        add("ok" if not mode & 0o027 else "warn", "دسترسی تنظیمات",
-            f"{mode:o}" + ("" if not mode & 0o027 else " (باید root:ziko با حالت 640 باشد)"))
+        add("ok" if not mode & 0o027 else "warn", "Configuration permissions",
+            f"{mode:o}" + ("" if not mode & 0o027 else " (expected root:ziko with mode 640)"))
         values = values or {}
         token = values.get("BOT_TOKEN", "")
         if not token or token.startswith("000000000:REPLACE"):
-            add("fail", "توکن ربات", "تنظیم نشده یا هنوز مقدار نمونه است")
+            add("fail", "Bot token", "Not configured or still using the sample value")
         elif not _TOKEN_FORMAT.fullmatch(token):
-            add("fail", "توکن ربات", "فرمت نامعتبر")
+            add("fail", "Bot token", "Invalid format")
         else:
-            add("ok", "توکن ربات", "تنظیم شده (مخفی)")
+            add("ok", "Bot token", "Configured (hidden)")
         ids = [x for x in re.split(r"[,;\s]+", values.get("ADMIN_IDS", "")) if x]
         good_ids = bool(ids) and all(x.isascii() and x.isdigit() and int(x) > 0 for x in ids)
         add("ok" if good_ids else "fail", "ADMIN_IDS",
-            f"{len(ids)} مدیر" if good_ids else "باید حداقل یک شناسه عددی معتبر باشد")
+            f"{len(ids)} admin(s)" if good_ids else "At least one valid numeric ID is required")
         level = (values.get("LOG_LEVEL") or "INFO").upper()
         add("ok" if level in _LOG_LEVELS else "fail", "LOG_LEVEL", level)
 
@@ -521,60 +521,60 @@ def run_checks() -> list[tuple[str, str, str]]:
             header_ok = fh.read(16) == _SQLITE_MAGIC
         mode = db.stat().st_mode & 0o777
         if not header_ok:
-            add("fail", "پایگاه داده", "هدر SQLite معتبر نیست")
+            add("fail", "Database", "Invalid SQLite header")
         elif mode & 0o077:
-            add("warn", "پایگاه داده", f"دسترسی {mode:o} است؛ باید 600 باشد")
+            add("warn", "Database", f"Permissions are {mode:o}; expected 600")
         else:
-            add("ok", "پایگاه داده", _human_size(db.stat().st_size))
+            add("ok", "Database", _human_size(db.stat().st_size))
     except FileNotFoundError:
-        add("warn", "پایگاه داده", "هنوز ساخته نشده (با اولین اجرا ساخته می‌شود)")
+        add("warn", "Database", "Not created yet (created on first run)")
     except PermissionError:
-        add("warn", "پایگاه داده", "دسترسی ندارید؛ با sudo اجرا کنید")
+        add("warn", "Database", "Permission denied; run with sudo")
 
     if not shutil.which("systemctl"):
-        add("fail", "systemd", "systemctl پیدا نشد")
+        add("fail", "systemd", "systemctl not found")
     else:
         info = service_info()
         state = service_state(info)
         if state == "not-found":
-            add("fail", "سرویس ziko", "نصب نشده")
+            add("fail", "ZIKO service", "Not installed")
         else:
-            add("ok" if state == "active" else "fail", "سرویس ziko", state)
+            add("ok" if state == "active" else "fail", "ZIKO service", state)
             enabled = info.get("UnitFileState") == "enabled"
-            add("ok" if enabled else "warn", "اجرا هنگام بوت", info.get("UnitFileState", "?"))
+            add("ok" if enabled else "warn", "Enabled at boot", info.get("UnitFileState", "?"))
             if info.get("NRestarts", "0") not in {"", "0"}:
-                add("warn", "ری‌استارت‌ها", f"{info['NRestarts']} بار از آخرین شروع")
+                add("warn", "Restarts", f"{info['NRestarts']} time(s) since last start")
 
     for name, level in (("backup.sh", "fail"), ("restore.sh", "fail"),
                         ("update.sh", "warn"), ("uninstall.sh", "warn")):
         found = (_scripts_dir() / name).is_file()
-        add("ok" if found else level, f"اسکریپت {name}", "موجود" if found else "پیدا نشد")
+        add("ok" if found else level, f"Script {name}", "Present" if found else "Not found")
 
     try:
         socket.create_connection(("api.telegram.org", 443), timeout=5).close()
-        add("ok", "اتصال به تلگرام", "api.telegram.org:443")
+        add("ok", "Telegram connectivity", "api.telegram.org:443")
     except OSError:
-        add("warn", "اتصال به تلگرام", "اتصال برقرار نشد (شبکه/فایروال را بررسی کنید)")
+        add("warn", "Telegram connectivity", "Connection failed (check network/firewall)")
 
     try:
         free = shutil.disk_usage(HOME if HOME.is_dir() else "/").free
         level = "fail" if free < 100 * 2**20 else "warn" if free < 500 * 2**20 else "ok"
-        add(level, "فضای دیسک", f"{_human_size(free)} آزاد")
+        add(level, "Disk space", f"{_human_size(free)} free")
     except OSError:
-        add("warn", "فضای دیسک", "نامشخص")
+        add("warn", "Disk space", "Unknown")
 
     mtime, problem = _last_backup()
     if mtime is None:
-        add("warn", "پشتیبان‌گیری", "دسترسی ندارید" if problem == "denied" else "هنوز پشتیبانی گرفته نشده")
+        add("warn", "Backup", "Permission denied" if problem == "denied" else "No backup has been created yet")
     else:
         age = time.time() - mtime
-        add("ok" if age < 7 * 86400 else "warn", "پشتیبان‌گیری", f"{_human_duration(age)} پیش")
+        add("ok" if age < 7 * 86400 else "warn", "Backup", f"{_human_duration(age)} ago")
     return checks
 
 
 def cmd_doctor() -> int:
     ui = _ui()
-    with ui.console.status("در حال بررسی..."):
+    with ui.console.status("Running diagnostics..."):
         checks = run_checks()
     ui.render_checks(checks)
     return 1 if any(c[0] == "fail" for c in checks) else 0
@@ -595,31 +595,31 @@ def cmd_version() -> int:
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ziko",
-        description="ZIKO - مدیریت دستیار شخصی تلگرام. بدون دستور، منوی تعاملی باز می‌شود.",
+        description="ZIKO - Telegram assistant manager. Run without a command to open the interactive menu.",
     )
-    p.add_argument("-V", "--version", action="store_true", help="نمایش نسخه")
+    p.add_argument("-V", "--version", action="store_true", help="Show version")
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
-    sub.add_parser("status", help="وضعیت سرویس و سلامت کلی")
-    sub.add_parser("start", help="شروع سرویس")
-    sub.add_parser("stop", help="توقف سرویس")
-    sub.add_parser("restart", help="راه‌اندازی مجدد سرویس")
-    logs = sub.add_parser("logs", help="مشاهده لاگ‌ها (توکن مخفی می‌شود)")
-    logs.add_argument("-n", "--lines", type=int, default=100, help="تعداد خطوط (پیش‌فرض ۱۰۰)")
-    logs.add_argument("-f", "--follow", action="store_true", help="دنبال کردن لاگ زنده")
-    upd = sub.add_parser("update", help="به‌روزرسانی (scripts/update.sh)")
-    upd.add_argument("-y", "--yes", action="store_true", help="بدون پرسش تأیید")
-    upd.add_argument("--repo", help="مخزن GitHub به‌شکل OWNER/REPOSITORY")
-    upd.add_argument("--version", help="برچسب نسخه مانند v1.2.3")
-    sub.add_parser("backup", help="پشتیبان‌گیری از پایگاه داده (scripts/backup.sh)")
-    res = sub.add_parser("restore", help="بازیابی از فایل پشتیبان (scripts/restore.sh)")
-    res.add_argument("file", metavar="FILE", help="مسیر فایل پشتیبان .sqlite3")
-    res.add_argument("-y", "--yes", action="store_true", help="بدون پرسش تأیید")
-    cfg = sub.add_parser("config", help="نمایش تنظیمات (توکن هرگز نمایش داده نمی‌شود)")
-    cfg.add_argument("--edit", action="store_true", help="ویرایش فایل .env")
-    sub.add_parser("doctor", help="عیب‌یابی و بررسی سلامت نصب")
-    sub.add_parser("version", help="نمایش نسخه")
-    un = sub.add_parser("uninstall", help="حذف ZIKO (scripts/uninstall.sh)")
-    un.add_argument("-y", "--yes", action="store_true", help="بدون پرسش تأیید")
+    sub.add_parser("status", help="Service status and overall health")
+    sub.add_parser("start", help="Start the service")
+    sub.add_parser("stop", help="Stop the service")
+    sub.add_parser("restart", help="Restart the service")
+    logs = sub.add_parser("logs", help="View logs (tokens are redacted)")
+    logs.add_argument("-n", "--lines", type=int, default=100, help="Number of lines (default: 100)")
+    logs.add_argument("-f", "--follow", action="store_true", help="Follow live logs")
+    upd = sub.add_parser("update", help="Update (scripts/update.sh)")
+    upd.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    upd.add_argument("--repo", help="GitHub repository in OWNER/REPOSITORY format")
+    upd.add_argument("--version", help="Release tag, e.g. v1.2.3")
+    sub.add_parser("backup", help="Back up the database (scripts/backup.sh)")
+    res = sub.add_parser("restore", help="Restore from a backup file (scripts/restore.sh)")
+    res.add_argument("file", metavar="FILE", help="Path to the .sqlite3 backup file")
+    res.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    cfg = sub.add_parser("config", help="Show configuration (the token is never displayed)")
+    cfg.add_argument("--edit", action="store_true", help="Edit the .env file")
+    sub.add_parser("doctor", help="Diagnose and check installation health")
+    sub.add_parser("version", help="Show version")
+    un = sub.add_parser("uninstall", help="Uninstall ZIKO (scripts/uninstall.sh)")
+    un.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     return p
 
 
@@ -627,12 +627,12 @@ def _interactive() -> int:
     ui = _ui()
 
     def restore() -> int:
-        file = ui.ask("مسیر فایل پشتیبان (خالی = لغو)")
+        file = ui.ask("Backup file path (empty = cancel)")
         return cmd_restore(file) if file else 0
 
     def config() -> int:
         rc = cmd_config()
-        if rc == 0 and ui.confirm("فایل تنظیمات ویرایش شود؟"):
+        if rc == 0 and ui.confirm("Edit the configuration file?"):
             return cmd_config(edit=True)
         return rc
 
