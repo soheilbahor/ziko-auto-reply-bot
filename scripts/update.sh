@@ -73,6 +73,13 @@ install_requirements() {
   "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check \
     -q -r "$ROOT/requirements.txt"
   (cd "$ROOT" && "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check .)
+
+  if ! "$ROOT/.venv/bin/python" -c 'from cryptography.fernet import Fernet' >/dev/null 2>&1; then
+    "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check \
+      --force-reinstall --no-cache-dir "cryptography>=42,<47"
+  fi
+
+  "$ROOT/.venv/bin/python" -c 'from cryptography.fernet import Fernet'
 }
 
 rollback() {
