@@ -1,3 +1,9 @@
+## [1.4.3] - 2026-11-25
+
+### Managed bots
+- Every incoming `managed_bot` update is logged on arrival (`Managed bot update received owner_id=... bot_id=...`), before any handling, so missing child bots can be traced in the journal.
+- Removed silent exits in the managed-bot handler: unexpected payloads and refused credential updates now log a warning.
+
 ## [1.4.2] - 2026-11-25
 
 ### Repository and installation

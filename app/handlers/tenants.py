@@ -5,6 +5,7 @@ import asyncio
 import logging
 import re
 import secrets
+from typing import Any
 from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -214,11 +215,25 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         if previous is not None and previous.enabled:
             await manager.start_tenant(previous)
 
+    async def _log_managed_bot_arrival(handler, event: Update, data: dict) -> Any:
+        # Runs for every update before routing: proves whether Telegram's managed_bot
+        # update reached this process, independently of the handler below.
+        managed = getattr(event, "managed_bot", None)
+        if managed is not None:
+            logger.info(
+                "Managed bot update received owner_id=%s bot_id=%s",
+                managed.user.id, managed.bot_user.id,
+            )
+        return await handler(event, data)
+
+    dispatcher.update.outer_middleware(_log_managed_bot_arrival)
+
     # ``update`` is a root-Dispatcher observer in aiogram; child Routers do not expose it.
     @dispatcher.update(F.managed_bot)
     async def managed_bot_updated(update: Update, bot: Bot) -> None:
         event = update.managed_bot
         if event is None:
+            logger.warning("Managed bot handler received an update without managed_bot payload")
             return
         owner_id = event.user.id
         child = event.bot_user
@@ -265,6 +280,7 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
                     username=child.username or str(child.id), token=token,
                 )
                 if tenant is None:
+                    logger.warning("Managed bot credential update refused bot_id=%s", child.id)
                     await _restart_previous_poller(child.id)
                     return
             else:
