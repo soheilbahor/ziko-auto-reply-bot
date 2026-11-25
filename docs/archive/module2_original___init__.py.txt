@@ -1,0 +1,17 @@
+"""Service layer for ZIKO Personal Assistant (Module 2: auto-reply engine)."""
+
+from app.services.auto_reply import (
+    AiogramBusinessTransport,
+    AutoReplyService,
+    BusinessTransport,
+    ConnectionOutcome,
+    ReplyOutcome,
+)
+
+__all__ = [
+    "AiogramBusinessTransport",
+    "AutoReplyService",
+    "BusinessTransport",
+    "ConnectionOutcome",
+    "ReplyOutcome",
+]

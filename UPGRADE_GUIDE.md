@@ -1,11 +1,16 @@
-# ZIKO 1.0.8 upgrade guide
+# ZIKO release and versioning guide
 
-## Before publishing
+## Single source of truth
 
-1. Upload the complete contents of this source archive to the canonical GitHub repository on `main`.
-2. Wait for the GitHub Actions CI workflow to finish successfully.
-3. Create and push the annotated tag `v1.0.8`. The Release workflow verifies that `app.__version__`, `pyproject.toml`, and `VERSION` agree, then publishes the ZIP, tar.gz, and SHA256SUMS assets.
-4. Do not deploy from an unverified branch archive. Use the published release assets and checksum.
+The root `VERSION` file is the only manually maintained application version. Do not edit a version literal in Python, TOML, shell scripts, or workflow files. `pyproject.toml` reads its package version from `VERSION`; `app.__version__` reads the same file in a source checkout and installed package metadata after installation. CI and the release workflow use `scripts/check_version.py`.
+
+## Publishing a release
+
+1. Update only the root `VERSION` file and add the matching `CHANGELOG.md` entry.
+2. Push the changes to `main` and wait for CI to pass.
+3. Create and push the matching tag, for example `git tag -a v1.2.2 -m "ZIKO v1.2.2" && git push origin v1.2.2`.
+4. The release workflow verifies that the tag matches `VERSION`, preserves the same marker in the archive, and publishes the assets.
+5. Never reuse or move a published tag. If a release tag is wrong, publish a new patch version with a new tag.
 
 ## Before updating an existing server
 
@@ -13,12 +18,12 @@ The first upgrade from the older 1.0.6 updater should have a full-platform backu
 
 ```bash
 sudo curl -fsSL \
-  https://raw.githubusercontent.com/ziko-freedom/ziko-auto-reply-bot/main/scripts/backup.sh \
+  https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/backup.sh \
   -o /tmp/ziko-platform-backup.sh
 sudo bash /tmp/ziko-platform-backup.sh
 ```
 
-The backup creates a regular main-database backup and a full-platform `.tar.gz` archive with a `.sha256` sidecar. Keep both files private; the platform archive contains the encrypted tenant registry and the key required to decrypt child-bot tokens.
+The backup creates an encrypted main-database `.sqlite3.age` backup and a full-platform `.tar.gz.age` archive encrypted with age and a `.sha256` sidecar. Keep both files private; the platform archive contains the encrypted tenant registry and the key required to decrypt child-bot tokens. Set `ZIKO_AGE_RECIPIENT` before backup/update and keep the matching age identity separately.
 
 Then update using the stable channel:
 

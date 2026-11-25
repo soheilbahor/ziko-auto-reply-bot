@@ -159,3 +159,47 @@ async def test_managed_bot_token_update_is_encrypted_and_owner_bound(tmp_path):
         assert still_owned.bot_token == new_token
     finally:
         await registry.close()
+
+
+@pytest.mark.asyncio
+async def test_global_tenant_capacity_is_enforced(tmp_path):
+    from app.tenant_registry import TenantLimitReached
+
+    registry = TenantRegistry(tmp_path / "tenants.sqlite3", max_total=1)
+    await registry.initialize()
+    try:
+        await registry.add_tenant(
+            user_id=1001, bot_id=2001, username="first_bot",
+            token="123456789:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+        )
+        with pytest.raises(TenantLimitReached):
+            await registry.add_tenant(
+                user_id=1002, bot_id=2002, username="second_bot",
+                token="223456789:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+            )
+    finally:
+        await registry.close()
+
+
+@pytest.mark.asyncio
+async def test_per_user_hourly_registration_limit_is_enforced(tmp_path):
+    from app.tenant_registry import TenantLimitReached
+
+    registry = TenantRegistry(
+        tmp_path / "tenants.sqlite3", max_total=10, per_user_per_hour=1
+    )
+    await registry.initialize()
+    try:
+        await registry.add_tenant(
+            user_id=1001, bot_id=2001, username="first_bot",
+            token="123456789:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+            allow_multiple=True,
+        )
+        with pytest.raises(TenantLimitReached):
+            await registry.add_tenant(
+                user_id=1001, bot_id=2002, username="second_bot",
+                token="223456789:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+                allow_multiple=True,
+            )
+    finally:
+        await registry.close()

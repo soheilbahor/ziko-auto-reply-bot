@@ -1,63 +1,81 @@
+# Changelog
+
+## [1.2.2] - 2026-11-25
+
+### Fixed
+- Made the root `VERSION` file the single source of truth for the application version.
+- Derived Python package metadata from `VERSION` and centralized CI/release validation.
+- Release archives now preserve and verify their embedded version instead of rewriting it from the tag.
+- Installer and updater reject mismatched or missing version markers.
+
+## [Unreleased]
+### Added
+- Best-effort sync of the master bot's profile photo to child bots (optional `ZIKO_TENANT_PROFILE_PHOTO` fallback). Not tested against live Telegram.
+
+## [1.2.1] - 2026-11-24
+### Fixed
+- Increased the default concurrent child-bot polling limit to match the default tenant capacity (50).
+- Exposed running, waiting, starting, and stopped child-bot states in the platform `/tenants` command.
+- Added queue and slot-acquisition logs so enabled bots waiting for capacity are no longer invisible.
+- Added regression tests for poller queue visibility and the default capacity.
+
+All notable changes to ZIKO are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+[Semantic Versioning](https://semver.org/).
+
+## [1.2.0] - Unreleased
+
+### Security and supply-chain hardening
+- Require age-encrypted full-platform backups; remove plaintext staging archives after encryption.
+- Verify backup ciphertext SHA256 before restore and decrypt with an operator-managed age identity.
+- Reject legacy plaintext platform archives by default; require an explicit compatibility override.
+- Verify GitHub build provenance during GitHub installation and stable-channel updates.
+- Generate SLSA build-provenance attestations for release archives.
+- Add `pip-audit` to CI and release verification.
+- Add weekly Dependabot updates for Python dependencies and GitHub Actions.
+- Pin GitHub Actions used by CI and release workflows to immutable commit SHAs.
+
+### Tenant reliability and capacity
+- Disable child bots automatically when Telegram returns Unauthorized for their token.
+- Notify platform administrators when a child bot is disabled because its token was rejected.
+- Bound concurrently active child-bot pollers with `ZIKO_TENANT_MAX_CONCURRENT_POLLERS` (default 10).
+
+### Backup, restore and service hardening
+- Add systemd kernel, device, address-family and syscall restrictions.
+- Add systemd restart burst limits.
+- Add shell-level backup, restore and rollback contract tests.
+
+### Documentation and repository hygiene
+- Update Persian and English READMEs for repository ownership and current release status.
+- Move historical QA, merge and integration reports under `docs/reports/`.
+- Move preserved original module snapshots under `docs/archive/`.
+- Remove the embedded BOM and reorder changelog entries.
+
 ## [1.1.0] - 2026-11-24
 
-- Fix Telegram Managed Bot update registration by registering the `managed_bot` filter on the root `Dispatcher.update` observer. Child `Router` instances do not expose the root-only `update` observer.
-- Preserve the existing secure managed-bot token retrieval, encrypted registry update, and tenant startup flow.
-- Add a nested terminal navigation system with Bot Management, Tenant Management, Auto Reply, Telegram Business, Backup & Restore, and Logs sections.
-- Add distinct log actions for the last 50 lines, live follow, and a validated custom line count; keep bot inventory and existing maintenance actions reachable.
-- Add concise operator guides for tenant management, auto-reply settings, and Telegram Business.
-- Improve terminal rendering on narrow, ASCII-only, and no-colour consoles while preserving the existing diagnostics, update center, security checks, and resource dashboard.
-- Promote the 1.0.9 maintenance changes into the 1.1.0 release.
+- Fix Telegram Managed Bot update registration by registering the `managed_bot` filter on the root `Dispatcher.update` observer.
+- Preserve secure managed-bot token retrieval, encrypted registry updates and tenant startup.
+- Add nested terminal navigation for Bot Management, Tenant Management, Auto Reply, Telegram Business, Backup & Restore, and Logs.
+- Add log actions for the last 50 lines, live follow and validated custom line counts.
+- Improve terminal rendering on narrow, ASCII-only and no-colour consoles.
+- Add CLI diagnostics, version handling, tenant management and full-platform backup/restore support.
+- Add managed child-bot creation, encrypted token registry, per-tenant SQLite databases and independent polling runtimes.
+- Add master commands to list, disable and re-enable child bots.
+- Preserve configuration and data during updates, with health checks and automatic rollback.
+- Add CI and release workflows for Python 3.12, pytest, Ruff, shell checks and release archives.
 
-## 1.0.9 maintenance revision (included in 1.1.0)
+## [1.0.9] - Maintenance revision included in 1.1.0
 
 - Require root at the beginning of the installer and for every ZIKO CLI invocation.
 - Add explicit root-only access guidance and post-install instructions.
 - Make dashboard and child-bot registry inspection resilient to filesystem permission errors.
 - Add live host CPU, memory, disk, load and uptime metrics plus main-process CPU/RAM estimates.
-- Expand diagnostics with Telegram `getMe`, webhook/polling mode, recent polling-conflict log checks and optional confirmed test delivery to the first configured administrator.
-- Full Ubuntu 24.04 installation, live Telegram, restore and service lifecycle validation remain pending.
+- Expand diagnostics with Telegram `getMe`, webhook/polling mode, polling-conflict log checks and optional confirmed test delivery.
 
-﻿## 1.0.9
+## [1.0.8] - Managed Bots onboarding
 
-- Add professional CLI update center with stable, specific-release and beta channels.
-- Detect available GitHub releases and main-branch updates.
-- Update GitHub repository ownership and project documentation.
-- Improve update backup and rollback handling.
-# Changelog
-
-## 1.0.8
-
-- Added Telegram Managed Bots onboarding: customers can create a bot through an official Telegram confirmation link without copying a token.
-- Added managed-bot update handling and secure token retrieval through `getManagedBotToken`.
-- Added encrypted credential refresh when Telegram reports a managed-bot token update.
-- Preserved the existing private-token connection flow as a fallback.
-- Added `managed_bot` to polling updates and `/connect_bot` command.
-
-
-All notable changes to this project are documented here.
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
-versions follow [Semantic Versioning](https://semver.org/). Release tags look like `v1.0.0`.
-
-## [Unreleased]
-
-### Added
-- Redesigned the Rich CLI into a sectioned operations dashboard with live version refresh, Help & About, and child-bot inventory.
-- Added `ziko bots list`, Stable/Dev update channel selection, and non-mutating update checks.
-- Made `VERSION` the installed CLI version source and ensured fresh installs create/validate it.
-- Added full-platform backups and validated restore for the main database, child-bot registry, encryption key and isolated tenant databases.
-- Improved update-channel validation and removed duplicate unit rollback work.
-- Multi-tenant child-bot MVP: one child bot per regular user and multiple bots for platform admins, BotFather token validation, Fernet-encrypted token registry, per-tenant SQLite databases and independent polling runtimes.
-- Telegram Business support for each child bot using the existing rule/status-based reply engine.
-- Master commands to list, disable and re-enable child bots; supervised polling retries with backoff.
-- GitHub preparation: Persian `README.md`, `README.en.md`, `CHANGELOG.md`, hardened `.gitignore`.
-- `.github/workflows/ci.yml`: Python 3.12, project dependencies, pytest (strict), Ruff, `bash -n`, ShellCheck, and a guard against tracked secrets/databases/backups.
-- `.github/workflows/release.yml`: on `vX.Y.Z` tags, builds `.zip`, `.tar.gz` and `SHA256SUMS` release assets.
-- `scripts/update.sh`: verified release download (SHA-256), database and code backup, preserved configuration, restart with health check, automatic rollback.
-
-### Baseline (existing, unchanged)
-- Telegram Business auto-reply bot on the official Bot API (aiogram 3.34.0, aiosqlite 0.22.1), long polling.
-- Admin panel, six statuses with editable texts, sessions, at-most-once delivery, SQLite storage.
-- `scripts/backup.sh`, `scripts/restore.sh`, `deploy/ziko.service`.
-
-<!-- Move the items above under "## [1.0.0] - YYYY-MM-DD" when releasing; the release workflow reads that section for the release notes. -->
-
+- Add Telegram Managed Bots onboarding through the official Telegram confirmation flow.
+- Retrieve managed bot tokens through `getManagedBotToken` without asking customers to copy them.
+- Encrypt refreshed credentials when Telegram reports a managed-bot token update.
+- Preserve private-token connection as a fallback.
+- Add `managed_bot` to polling updates and the `/connect_bot` command.

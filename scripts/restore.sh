@@ -55,7 +55,13 @@ rollback(){
    systemctl stop "$SERVICE" >/dev/null 2>&1
    rm -f -- "$DB-wal" "$DB-shm" "$DB-journal"
    if [[ -n "$OLD" && -f "$OLD" ]]; then
-     if cp -p -- "$OLD" "$DB.rollback.$$" &&
+     local rollback_plain="$WORK/pre-restore-rollback.sqlite3"
+     local identity="${ZIKO_AGE_IDENTITY:-/etc/ziko-assistant/backup-age-identity}"
+     if [[ -f "$OLD.sha256" && -f "$identity" && ! -L "$identity" ]] &&
+        [[ "$(stat -c '%u:%a' "$identity")" =~ ^0:(400|600)$ ]] &&
+        (cd "$BACKUP_DIR" && sha256sum -c "$(basename "$OLD").sha256") &&
+        age -d -i "$identity" -o "$rollback_plain" "$OLD" &&
+        cp -p -- "$rollback_plain" "$DB.rollback.$$" &&
         chown "$APP_USER:$APP_GROUP" "$DB.rollback.$$" &&
         chmod 600 "$DB.rollback.$$" &&
         mv -f -- "$DB.rollback.$$" "$DB"; then
@@ -69,6 +75,9 @@ PY
        then
          ROLLBACK_OK=1
        fi
+     else
+       rm -f -- "$DB.rollback.$$" "$rollback_plain"
+       echo "WARNING: encrypted pre-restore snapshot could not be verified/decrypted; service remains stopped." >&2
      fi
    else
      rm -f -- "$DB"
@@ -87,8 +96,21 @@ PY
 trap rollback ERR INT TERM
 trap cleanup EXIT
 
+SOURCE_DB="$SRC"
+if [[ "$SRC" == *.age ]]; then
+  command -v age >/dev/null 2>&1 || die "age is required to decrypt this database backup."
+  IDENTITY="${ZIKO_AGE_IDENTITY:-/etc/ziko-assistant/backup-age-identity}"
+  [[ -f "$IDENTITY" && ! -L "$IDENTITY" ]] || die "age identity file not found or is a symlink: $IDENTITY"
+  identity_owner_mode="$(stat -c '%u:%a' "$IDENTITY")"
+  [[ "$identity_owner_mode" =~ ^0:(400|600)$ ]] || die "age identity must be root-owned with mode 0400 or 0600."
+  DECRYPTED="$WORK/decrypted.sqlite3"
+  age -d -i "$IDENTITY" -o "$DECRYPTED" "$SRC" || die "Could not decrypt database backup; check the age identity."
+  chmod 600 "$DECRYPTED"
+  SOURCE_DB="$DECRYPTED"
+fi
+
 # Validate source SQLite header, integrity and foreign keys before creating a live copy.
-cp -- "$SRC" "$STAGE"
+cp -- "$SOURCE_DB" "$STAGE"
 "$PY" - "$STAGE" <<'PY'
 import sqlite3,sys
 p=sys.argv[1]
@@ -148,10 +170,19 @@ fi
 if systemctl is-active --quiet "$SERVICE"; then WAS_ACTIVE=1; systemctl stop "$SERVICE"; fi
 # Keep a byte-for-byte rollback image of the original DB (including the online backup snapshot).
 if [[ -f "$DB" ]]; then
+  : "${ZIKO_AGE_RECIPIENT:?Set ZIKO_AGE_RECIPIENT before restoring; pre-restore backup is mandatory.}"
+  command -v age >/dev/null 2>&1 || die "age is required for encrypted pre-restore backups."
+  AGE_IDENTITY="${ZIKO_AGE_IDENTITY:-/etc/ziko-assistant/backup-age-identity}"
+  [[ -f "$AGE_IDENTITY" && ! -L "$AGE_IDENTITY" ]] || die "Install the root-only age identity before restore: $AGE_IDENTITY"
+  [[ "$(stat -c '%u:%a' "$AGE_IDENTITY")" =~ ^0:(400|600)$ ]] || die "age identity must be root-owned with mode 0400 or 0600."
   # Keep a durable online snapshot of the original DB; it includes committed WAL content.
   install -d -o "$APP_USER" -g "$APP_GROUP" -m 700 "$BACKUP_DIR"
-  OLD="$BACKUP_DIR/ziko-pre-restore-$(date -u +%Y%m%dT%H%M%S)-$$.sqlite3"
-  "$PY" - "$DB" "$OLD" <<'PY'
+  : "${ZIKO_AGE_RECIPIENT:?Set ZIKO_AGE_RECIPIENT before restoring; pre-restore backup is mandatory.}"
+  command -v age >/dev/null 2>&1 || die "age is required for encrypted pre-restore backups."
+  OLD="$BACKUP_DIR/ziko-pre-restore-$(date -u +%Y%m%dT%H%M%S)-$$.sqlite3.age"
+  OLD_PLAIN="$WORK/pre-restore.sqlite3"
+  OLD_CIPHER="$WORK/pre-restore.sqlite3.age"
+  "$PY" - "$DB" "$OLD_PLAIN" <<'PY'
 import sqlite3,sys
 a=sqlite3.connect(f"file:{sys.argv[1]}?mode=rw",uri=True); b=sqlite3.connect(sys.argv[2])
 try:
@@ -159,7 +190,10 @@ try:
  if b.execute("PRAGMA integrity_check").fetchone()[0]!="ok": raise SystemExit("pre-restore backup integrity failure")
 finally:b.close();a.close()
 PY
-  chown "$APP_USER:$APP_GROUP" "$OLD"; chmod 600 "$OLD"
+  chmod 600 "$OLD_PLAIN"
+  age -r "$ZIKO_AGE_RECIPIENT" -o "$OLD_CIPHER" "$OLD_PLAIN"
+  install -o "$APP_USER" -g "$APP_GROUP" -m 600 "$OLD_CIPHER" "$OLD"
+  rm -f -- "$OLD_PLAIN" "$OLD_CIPHER"
   (cd "$BACKUP_DIR" && sha256sum "$(basename "$OLD")" > "$(basename "$OLD").sha256")
   chown "$APP_USER:$APP_GROUP" "$OLD.sha256"; chmod 600 "$OLD.sha256"
 fi

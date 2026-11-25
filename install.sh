@@ -40,7 +40,12 @@ log(){ printf '[ziko-install] %s\n' "$*"; }
 die(){ printf '[ziko-install] ERROR: %s\n' "$*" >&2; exit 1; }
 confirm(){ local a; read -r -p "$1 [y/N] " a </dev/tty || return 1; [[ "$a" =~ ^[Yy]([Ee][Ss])?$ ]]; }
 # shellcheck disable=SC2317
-cleanup(){ [[ -n "$STAGE" && -d "$STAGE" ]] && rm -rf -- "$STAGE"; }
+cleanup(){
+  [[ -n "$STAGE" && -d "$STAGE" ]] && rm -rf -- "$STAGE"
+  if [[ -n "$DB_SNAPSHOT" && -f "$DB_SNAPSHOT" && ! -f "$DB_SNAPSHOT.sha256" ]]; then
+    rm -f -- "$DB_SNAPSHOT"
+  fi
+}
 # shellcheck disable=SC2317
 rollback(){
   local rc=$?
@@ -52,9 +57,19 @@ rollback(){
     [[ -d "$APP_DIR" ]] && mv -- "$APP_DIR" "${APP_DIR}.failed-${STAMP}"
     [[ -d "$PREVIOUS" ]] && mv -- "$PREVIOUS" "$APP_DIR"
     if [[ -n "$DB_SNAPSHOT" && -f "$DB_SNAPSHOT" ]]; then
-      install -o "$APP_USER" -g "$APP_GROUP" -m 600 "$DB_SNAPSHOT" "${DB_FILE}.rollback-${STAMP}"
-      mv -f -- "${DB_FILE}.rollback-${STAMP}" "$DB_FILE"
-      rm -f -- "$DB_FILE-wal" "$DB_FILE-shm" "$DB_FILE-journal"
+      local rollback_plain="${DB_FILE}.rollback-${STAMP}.sqlite3"
+      local age_identity="${ZIKO_AGE_IDENTITY:-/etc/ziko-assistant/backup-age-identity}"
+      if [[ -f "$DB_SNAPSHOT.sha256" && -f "$age_identity" && ! -L "$age_identity" ]] &&
+         [[ "$(stat -c '%u:%a' "$age_identity")" =~ ^0:(400|600)$ ]] &&
+         (cd "$BACKUP_DIR" && sha256sum -c "$(basename "$DB_SNAPSHOT").sha256") &&
+         age -d -i "$age_identity" -o "$rollback_plain" "$DB_SNAPSHOT"; then
+        install -o "$APP_USER" -g "$APP_GROUP" -m 600 "$rollback_plain" "${DB_FILE}.rollback-${STAMP}"
+        mv -f -- "${DB_FILE}.rollback-${STAMP}" "$DB_FILE"
+        rm -f -- "$rollback_plain" "$DB_FILE-wal" "$DB_FILE-shm" "$DB_FILE-journal"
+      else
+        rm -f -- "$rollback_plain" "${DB_FILE}.rollback-${STAMP}"
+        log "WARNING: encrypted pre-install database snapshot could not be verified/decrypted: $DB_SNAPSHOT"
+      fi
     elif [[ "$DB_EXISTED" -eq 0 ]]; then
       rm -f -- "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm" "$DB_FILE-journal"
     fi
@@ -171,14 +186,7 @@ import sys,tomllib
 p=tomllib.load(open(sys.argv[1],"rb"))
 assert p["project"]["scripts"].get("ziko") == "app.cli:main"
 PY
-if [[ ! -s "$STAGE/VERSION" ]]; then
-  python3.12 - "$STAGE/pyproject.toml" "$STAGE/VERSION" <<'PYCODE'
-import sys, tomllib
-from pathlib import Path
-version = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["project"]["version"]
-Path(sys.argv[2]).write_text(version + "\n", encoding="utf-8")
-PYCODE
-fi
+[[ -s "$STAGE/VERSION" ]] || die "VERSION file is missing from release archive"
 python3.12 - "$STAGE/VERSION" <<'PYCODE'
 import re,sys
 value=open(sys.argv[1],encoding="utf-8").read().strip()
@@ -202,10 +210,17 @@ PY
 )
 
 # Snapshot current DB before any service stop/start or application migration.
+DB_SNAPSHOT_PLAIN=""
 if [[ -f "$DB_FILE" ]]; then
   DB_EXISTED=1
-  DB_SNAPSHOT="$BACKUP_DIR/ziko-pre-install-${STAMP}.sqlite3"
-  python3.12 - "$DB_FILE" "$DB_SNAPSHOT" <<'PY'
+  : "${ZIKO_AGE_RECIPIENT:?Set ZIKO_AGE_RECIPIENT before upgrading an existing installation.}"
+  command -v age >/dev/null 2>&1 || die "age is required for encrypted pre-install backups."
+  AGE_IDENTITY="${ZIKO_AGE_IDENTITY:-/etc/ziko-assistant/backup-age-identity}"
+  [[ -f "$AGE_IDENTITY" && ! -L "$AGE_IDENTITY" ]] || die "Install the root-only age identity before upgrading an existing database: $AGE_IDENTITY"
+  [[ "$(stat -c '%u:%a' "$AGE_IDENTITY")" =~ ^0:(400|600)$ ]] || die "age identity must be root-owned with mode 0400 or 0600."
+  DB_SNAPSHOT="$BACKUP_DIR/ziko-pre-install-${STAMP}.sqlite3.age"
+  DB_SNAPSHOT_PLAIN="$STAGE/preinstall.sqlite3"
+  python3.12 - "$DB_FILE" "$DB_SNAPSHOT_PLAIN" <<'PY'
 import sqlite3,sys
 a=sqlite3.connect(sys.argv[1]); b=sqlite3.connect(sys.argv[2])
 try:
@@ -213,15 +228,13 @@ try:
  if b.execute("PRAGMA integrity_check").fetchone()[0] != "ok": raise SystemExit("database backup integrity failed")
 finally: b.close(); a.close()
 PY
-  chmod 600 "$DB_SNAPSHOT"; chown "$APP_USER:$APP_GROUP" "$DB_SNAPSHOT"
-  (cd "$BACKUP_DIR" && sha256sum "$(basename "$DB_SNAPSHOT")" > "$(basename "$DB_SNAPSHOT").sha256")
-  chown "$APP_USER:$APP_GROUP" "$DB_SNAPSHOT.sha256"; chmod 600 "$DB_SNAPSHOT.sha256"
+  chmod 600 "$DB_SNAPSHOT_PLAIN"; chown "$APP_USER:$APP_GROUP" "$DB_SNAPSHOT_PLAIN"
 fi
 
 # Check existing database migration using the staged project's REAL Database.initialize() on a copy.
 if [[ -f "$DB_FILE" ]]; then
   MIGRATION_COPY="$STAGE/migration-check.sqlite3"
-  cp -- "$DB_SNAPSHOT" "$MIGRATION_COPY"
+  cp -- "$DB_SNAPSHOT_PLAIN" "$MIGRATION_COPY"
   chown root:root "$MIGRATION_COPY"
   (cd "$STAGE" && "$STAGE/.venv/bin/python" - "$MIGRATION_COPY" <<'PY'
 import asyncio,sys
@@ -241,6 +254,11 @@ finally: c.close()
 PY
   )
   rm -f "$MIGRATION_COPY" "$MIGRATION_COPY-wal" "$MIGRATION_COPY-shm" "$MIGRATION_COPY-journal"
+  age -r "$ZIKO_AGE_RECIPIENT" -o "$DB_SNAPSHOT" "$DB_SNAPSHOT_PLAIN"
+  chmod 600 "$DB_SNAPSHOT"; chown "$APP_USER:$APP_GROUP" "$DB_SNAPSHOT"
+  rm -f -- "$DB_SNAPSHOT_PLAIN"
+  (cd "$BACKUP_DIR" && sha256sum "$(basename "$DB_SNAPSHOT")" > "$(basename "$DB_SNAPSHOT").sha256")
+  chown "$APP_USER:$APP_GROUP" "$DB_SNAPSHOT.sha256"; chmod 600 "$DB_SNAPSHOT.sha256"
 fi
 # A venv embeds its absolute creation path in console-script shebangs; never move it.
 rm -rf -- "$STAGE/.venv"

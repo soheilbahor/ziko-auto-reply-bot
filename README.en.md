@@ -1,10 +1,10 @@
 # ZIKO Personal Assistant
 
-[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
-[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
-[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
+[![Latest Stable Release](https://img.shields.io/github/v/release/soheilbahor/ziko-auto-reply-bot?label=stable)](https://github.com/soheilbahor/ziko-auto-reply-bot/releases/latest)
+[![CI](https://github.com/soheilbahor/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/soheilbahor/ziko-auto-reply-bot/actions/workflows/ci.yml)
+[![Release](https://github.com/soheilbahor/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/soheilbahor/ziko-auto-reply-bot/actions/workflows/release.yml)
 
-**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
+**Repository:** [soheilbahor/ziko-auto-reply-bot](https://github.com/soheilbahor/ziko-auto-reply-bot) Â· [Releases](https://github.com/soheilbahor/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/soheilbahor/ziko-auto-reply-bot/issues)
 
 **English** · [فارسی](README.md)
 
@@ -13,9 +13,9 @@
 
 ZIKO is a *Connected Business Bot*. When you pick a status (e.g. "Sleeping"), it sends that status' auto-reply on your behalf to new private messages — **once per session per chat**.
 
-> ⚠️ Status: pre-1.0.0. Real test execution evidence is in [`QA_REPORT.md`](QA_REPORT.md); items it lists as "not run" still have to be run in CI or on Python 3.12.
+> ⚠️ Status: version 1.2.1 is prepared; CI and Ubuntu 24.04 validation are still required before production approval. Earlier QA evidence is in [`docs/reports/QA_REPORT.md`](docs/reports/QA_REPORT.md), and the current security phase report is in [`docs/PHASE1_SECURITY_REPORT.md`](docs/PHASE1_SECURITY_REPORT.md). This build is not production-approved until CI and Ubuntu 24.04 validation pass.
 
-Merge and test report: [`MERGE_TEST_REPORT.md`](MERGE_TEST_REPORT.md).
+Previous merge and test report: [`docs/reports/MERGE_TEST_REPORT.md`](docs/reports/MERGE_TEST_REPORT.md).
 
 ## Contents
 
@@ -47,7 +47,7 @@ Telegram Bot API (HTTPS, long polling)
                                    └── SQLite (aiosqlite)  /var/lib/ziko-assistant/ziko.sqlite3
 ```
 
-See [`INTEGRATION_REPORT.md`](INTEGRATION_REPORT.md), [`MODULE1_CONTRACT.md`](MODULE1_CONTRACT.md), [`SECURITY.md`](SECURITY.md), [`DEPLOYMENT.md`](DEPLOYMENT.md).
+See [`docs/reports/INTEGRATION_REPORT.md`](docs/reports/INTEGRATION_REPORT.md), [`docs/specs/MODULE1_CONTRACT.md`](docs/specs/MODULE1_CONTRACT.md), [`SECURITY.md`](SECURITY.md), [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Requirements
 
@@ -60,12 +60,12 @@ See [`INTEGRATION_REPORT.md`](INTEGRATION_REPORT.md), [`MODULE1_CONTRACT.md`](MO
 
 ### One-command installation from GitHub
 
-Replace `ziko-freedom/ziko-auto-reply-bot` with the real public GitHub repository. This installs the
+Replace `soheilbahor/ziko-auto-reply-bot` with the real public GitHub repository. This installs the
 Ubuntu 24.04 prerequisites, downloads the latest GitHub Release, verifies the asset
 against `SHA256SUMS`, and launches the interactive installer:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/ziko-freedom/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- ziko-freedom/ziko-auto-reply-bot'
+sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar age gh && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- soheilbahor/ziko-auto-reply-bot'
 ```
 
 The installer reads the bot token without terminal echo. It does not put the token in
@@ -126,9 +126,9 @@ After installation, the `ziko` command manages the service; run `ziko --help` fo
 |---|---|
 | `sudo systemctl status ziko` / `restart ziko` | Service status / restart |
 | `journalctl -u ziko -f` | Follow logs |
-| `sudo ziko backup` | Back up the database |
-| `sudo ziko restore FILE.sqlite3` | Restore the database |
-| `sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot [--version vX.Y.Z]` | Update from a Release |
+| `sudo ZIKO_AGE_RECIPIENT=age1... ziko backup` | Create encrypted backups |
+| `sudo ziko restore FILE.sqlite3.age` or `FILE.tar.gz.age` | Restore database or full platform |
+| `sudo ziko update --repo soheilbahor/ziko-auto-reply-bot [--version vX.Y.Z]` | Update from a Release |
 | `pytest -ra` | Run the tests |
 
 ## Updating
@@ -141,18 +141,18 @@ The Update Center supports two channels:
 - Check without changing files: add `--check`, for example
   `sudo ziko update --channel stable --check`
 
-Every update verifies the published SHA-256 checksum, snapshots the current code and
-database, preserves local configuration/data/venv, and performs a service health check.
+Stable updates verify both SHA-256 and GitHub build provenance. Before updating, the updater creates an age-encrypted full-platform backup; install `age` and `gh`, and provide `ZIKO_AGE_RECIPIENT` in the update environment. Keep the matching private age identity separate from backups.
 
 ```bash
-sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot
-sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot --version v1.0.0
+sudo ziko update --channel stable
+sudo ziko update --channel stable --version v1.2.0
+sudo ziko update --channel stable --check
 ```
 
 The script:
 
 1. Downloads the release (latest or the requested tag) and checks its **SHA-256** against that release's `SHA256SUMS`; on mismatch nothing is installed.
-2. Stops the service, backs up the database (`/var/backups/ziko-assistant/ziko-pre-update-*.sqlite3`) and snapshots the current code (`/var/backups/ziko-assistant/code-*.tar.gz`).
+2. Creates an age-encrypted full-platform backup (`ziko-platform-*.tar.gz.age`) and snapshots the current code (`code-*.tar.gz`) before replacing files.
 3. Replaces the code while **leaving `.env`, `data/`, `.venv` and `backups/` untouched**, then installs requirements.
 4. Starts the service and watches it for a few seconds.
 5. On any failure it **rolls back automatically**: previous code and requirements are restored, the database is restored from the backup (if the new version had started), and the service is started again.
@@ -161,55 +161,24 @@ Notes: SHA-256 only proves the download is intact, not that the release is trust
 
 ## Backup and restore
 
-```bash
-sudo ziko backup
-sudo ziko restore /var/backups/ziko-assistant/ziko-YYYYMMDDTHHMMSSZ-XXXXXX.sqlite3
-```
-
-Backups use SQLite's online backup API (the service may keep running). Restore stops the service, keeps the current DB as `.pre-restore.<timestamp>`, installs the backup with owner-only permissions and restarts. Backups hold connection metadata: treat them as sensitive, encrypt them, keep them off-host, never commit them.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| Service won't start | `journalctl -u ziko -n 100`; a `BOT_TOKEN`/`ADMIN_IDS` error means `.env` is missing or invalid. |
-| Bot ignores `/start` | Your ID is not in `ADMIN_IDS`, or the token is wrong. |
-| "Bot not connected yet" | Repeat the Business connection steps; check Business Mode in BotFather and Premium on the account. |
-| Connected but no replies | Auto-reply is off / no status active; `can_reply` not granted; connection disabled; chat already answered in this session. |
-| A delivery was recorded as "uncertain" | By design (at-most-once) it is not retried; see [`MODULE1_CONTRACT.md`](MODULE1_CONTRACT.md). |
-| `Permission denied` on `data/` | `data/` must be owned by `ziko`, mode `700`. |
-| Update: `SHA-256 mismatch` | Corrupted download or tampered release; nothing was installed. Retry or tell the repository owner. |
-| Update rolled back | `journalctl -u ziko`; backups are in `backups/`. |
-
-## Development
+Both standalone database backups (`.sqlite3.age`) and full-platform archives
+(`.tar.gz.age`) are encrypted with `age`. Full-platform archives include the main
+database, tenant registry, token-encryption key and isolated tenant databases.
 
 ```bash
-python3.12 -m venv .venv && . .venv/bin/activate
-pip install -r requirements-dev.txt
-pytest -ra
-ZIKO_STRICT=1 pytest -ra     # release gate: zero skips
+# Create encrypted backups with your public age recipient
+sudo ZIKO_AGE_RECIPIENT='age1...' ziko backup
+
+# Restore a standalone database
+sudo ZIKO_AGE_RECIPIENT='age1...' ZIKO_AGE_IDENTITY=/etc/ziko-assistant/backup-age-identity ziko restore /var/backups/ziko-assistant/ziko-....sqlite3.age
+
+# Restore a full platform archive
+sudo ZIKO_AGE_RECIPIENT='age1...' ZIKO_AGE_IDENTITY=/etc/ziko-assistant/backup-age-identity ziko restore /var/backups/ziko-assistant/ziko-platform-....tar.gz.age
 ```
 
-CI (`.github/workflows/ci.yml`) runs on Python 3.12 with the project's real dependencies: pytest, Ruff, `bash -n` and ShellCheck. Pushing a tag such as `v1.0.0` runs `.github/workflows/release.yml`, which builds ZIP, tar.gz and `SHA256SUMS` release assets. See [`CHANGELOG.md`](CHANGELOG.md).
+Keep the private age identity root-owned with mode `0400` or `0600`, separate from
+the backup destination, and retain each `.sha256` sidecar with its `.age` archive.
+Legacy plaintext platform archives are rejected unless
+`ZIKO_ALLOW_LEGACY_PLAINTEXT_BACKUP=1` is explicitly set for a trusted migration.
+See [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-## License
-
-**No license has been chosen yet.** Until the repository owner approves one and adds a `LICENSE` file, all rights are reserved.
-
-## Multi-tenant child bots
-
-Regular Telegram users can register one child bot. The preferred flow uses official Telegram Managed Bots: the customer confirms bot creation in Telegram, then ZIKO receives the `managed_bot` update and retrieves the token with `getManagedBotToken` without asking the customer to copy it. Existing bots can still be connected with `/connect_bot` by submitting the token privately. Tokens are encrypted with Fernet and each child bot uses an isolated polling task and SQLite database. The master bot must have Bot Management Mode enabled.
-
-Platform administration:
-- `/tenants` — list registered bots and their Bot IDs.
-- `/tenant_disable BOT_ID` — stop one child bot without deleting its data.
-- `/tenant_enable BOT_ID` — re-enable one child bot.
-- `ziko bots list` — view registry metadata from the server CLI without exposing tokens.
-
-Each bot owner must connect their child bot under Telegram Settings → Telegram Business
-→ Chatbots and grant reply permission. The token encryption key is stored as
-`tenant-token.key` with mode `0600`; losing it makes stored child-bot tokens unrecoverable.
-
-The deployment remains a single-server, single-process polling architecture. It is not
-advertised as horizontally scalable. Full-platform backup/restore includes the main
-database, child-bot registry, encryption key and isolated tenant databases.

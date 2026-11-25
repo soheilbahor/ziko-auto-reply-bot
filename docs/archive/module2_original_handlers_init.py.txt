@@ -1,0 +1,5 @@
+"""aiogram routers for ZIKO Personal Assistant."""
+
+from app.handlers.business import create_business_router
+
+__all__ = ["create_business_router"]

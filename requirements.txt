@@ -1,4 +1,4 @@
 aiogram==3.34.0
 aiosqlite==0.22.1
 rich>=13.7,<15
-cryptography>=42,<47
+cryptography>=46.0.7,<51

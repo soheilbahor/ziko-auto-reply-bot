@@ -24,6 +24,7 @@ from app.tenant_bots import TenantBotManager
 from app.tenant_registry import (
     BotAlreadyRegistered,
     TenantRegistry,
+    TenantLimitReached,
     UserAlreadyHasBot,
 )
 
@@ -171,6 +172,13 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
             )
         except UserAlreadyHasBot:
             await message.answer("شما قبلاً یک ربات ثبت کرده‌اید؛ هر کاربر فقط یک ربات می‌تواند داشته باشد.")
+            await state.clear()
+            return
+        except TenantLimitReached:
+            await message.answer(
+                "ظرفیت ثبت ربات در حال حاضر تکمیل است یا محدودیت ثبت‌نام ساعتی شما به پایان رسیده است. "
+                "کمی بعد دوباره تلاش کنید."
+            )
             await state.clear()
             return
         except BotAlreadyRegistered:

@@ -4,11 +4,23 @@ set -Eeuo pipefail
 umask 077
 die(){ printf '[ziko-github-install] ERROR: %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "Root privileges are required. Run: sudo bash install-from-github.sh OWNER/REPOSITORY"
-[[ $# -eq 1 ]] || die "Usage: install-from-github.sh OWNER/REPOSITORY"
-REPO="$1"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="${ZIKO_REPO:-}"
+if [[ $# -gt 1 ]]; then die "Usage: install-from-github.sh [OWNER/REPOSITORY]"; fi
+if [[ $# -eq 1 ]]; then
+  REPO="$1"
+elif [[ -z "$REPO" && -r "$ROOT/deploy/release.conf" ]]; then
+  while IFS='=' read -r key value; do
+    [[ "$key" == "ZIKO_REPO" ]] || continue
+    value="${value%$'\\r'}"
+    [[ -n "$value" ]] && REPO="$value"
+    break
+  done < "$ROOT/deploy/release.conf"
+fi
+REPO="${REPO:-soheilbahor/ziko-auto-reply-bot}"
 [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ && "$REPO" != "OWNER/REPOSITORY" ]] \
   || die "Replace OWNER/REPOSITORY with the real public GitHub repository."
-for cmd in curl python3 tar sha256sum grep; do command -v "$cmd" >/dev/null || die "Missing command: $cmd"; done
+for cmd in curl python3 tar sha256sum grep gh; do command -v "$cmd" >/dev/null || die "Missing command: $cmd"; done
 WORK="$(mktemp -d)"
 cleanup(){ rm -rf -- "$WORK"; }
 trap cleanup EXIT
@@ -31,6 +43,8 @@ curl -fsSL --retry 3 --proto '=https' --tlsv1.2 "$URL/SHA256SUMS" -o "$WORK/SHA2
   || die "SHA256SUMS does not contain exactly one checksum for $ASSET"
 (cd "$WORK" && grep -E "^[A-Fa-f0-9]{64}  ${ASSET}$" SHA256SUMS | sha256sum -c --status -) \
   || die "Release asset checksum mismatch."
+gh attestation verify "$WORK/$ASSET" --repo "$REPO" \
+  || die "GitHub release provenance attestation verification failed."
 if tar -tzf "$WORK/$ASSET" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
   die "Release archive contains an unsafe path."
 fi

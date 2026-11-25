@@ -30,6 +30,10 @@ class TokenDecryptionError(TenantRegistryError):
     pass
 
 
+class TenantLimitReached(TenantRegistryError):
+    """Registration is blocked by a configured platform or user quota."""
+
+
 @dataclass(frozen=True, slots=True)
 class Tenant:
     user_id: int
@@ -44,8 +48,18 @@ class Tenant:
 class TenantRegistry:
     """Small SQLite control-plane registry; tenant data lives in separate DB files."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self, database_path: Path, *, max_total: int | None = None,
+        per_user_per_hour: int | None = None,
+    ) -> None:
         self.path = Path(database_path)
+        self.max_total = max_total if max_total is not None else int(os.environ.get("ZIKO_TENANT_MAX_TOTAL", "50"))
+        self.per_user_per_hour = (
+            per_user_per_hour if per_user_per_hour is not None
+            else int(os.environ.get("ZIKO_TENANT_PER_USER_PER_HOUR", "3"))
+        )
+        if self.max_total < 1 or self.per_user_per_hour < 1:
+            raise ValueError("Tenant registration limits must be positive integers.")
         self.key_path = self.path.with_name("tenant-token.key")
         self._conn: aiosqlite.Connection | None = None
         self._fernet: Fernet | None = None
@@ -138,6 +152,18 @@ class TenantRegistry:
         async with self._lock:
             await conn.execute("BEGIN IMMEDIATE")
             try:
+                async with conn.execute("SELECT COUNT(*) FROM tenants") as cur:
+                    total = int((await cur.fetchone())[0])
+                if total >= self.max_total:
+                    raise TenantLimitReached("The platform tenant capacity has been reached")
+                async with conn.execute(
+                    "SELECT COUNT(*) FROM tenants WHERE user_id=? "
+                    "AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour')",
+                    (user_id,),
+                ) as cur:
+                    recent = int((await cur.fetchone())[0])
+                if recent >= self.per_user_per_hour:
+                    raise TenantLimitReached("The user registration rate limit has been reached")
                 if not allow_multiple:
                     async with conn.execute("SELECT 1 FROM tenants WHERE user_id=? LIMIT 1", (user_id,)) as cur:
                         if await cur.fetchone():

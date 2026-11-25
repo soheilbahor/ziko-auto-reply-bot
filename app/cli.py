@@ -25,7 +25,25 @@ from pathlib import Path
 HOME = Path(os.environ.get("ZIKO_HOME", "/opt/ziko-assistant"))
 SERVICE = os.environ.get("ZIKO_SERVICE", "ziko")
 SERVICE_USER = "ziko"
-GITHUB_REPO = os.environ.get("ZIKO_REPO", "ziko-freedom/ziko-auto-reply-bot")
+def _configured_github_repo() -> str:
+    """Resolve repo: environment override, deploy/release.conf, then safe default."""
+    env_repo = os.environ.get("ZIKO_REPO", "").strip()
+    if env_repo:
+        return env_repo
+    config = HOME / "deploy" / "release.conf"
+    try:
+        for raw in config.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("ZIKO_REPO="):
+                value = line.partition("=")[2].strip().strip("\\\"' ")
+                if value:
+                    return value
+    except OSError:
+        pass
+    return "soheilbahor/ziko-auto-reply-bot"
+
+
+GITHUB_REPO = _configured_github_repo()
 _UPDATE_STATUS_CACHE: tuple[float, dict[str, str | bool]] | None = None
 
 _TOKEN_RE = re.compile(r"\d{6,}:[A-Za-z0-9_-]{20,}")
@@ -571,7 +589,12 @@ def cmd_backup() -> int:
     script = _script("backup.sh")
     if not script:
         return 1
-    rc = _stream(_as_service_user(["bash", str(script)]))
+    forwarded_env = [
+        f"{name}={os.environ[name]}"
+        for name in ("ZIKO_AGE_RECIPIENT", "ZIKO_AGE_IDENTITY")
+        if os.environ.get(name)
+    ]
+    rc = _stream(_as_service_user(["env", *forwarded_env, "bash", str(script)]))
     if rc == 0:
         ui.ok("Backup completed.")
     else:
@@ -585,7 +608,8 @@ def cmd_restore(file: str, yes: bool = False) -> int:
     if not path.is_file():
         ui.error(f"Backup file not found: {path}")
         return 2
-    platform_archive = path.name.endswith(".tar.gz") or path.suffix == ".tgz"
+    platform_archive = path.name.endswith(".tar.gz") or path.name.endswith(".tar.gz.age") or path.suffix == ".tgz"
+    encrypted_database = path.name.endswith(".sqlite3.age")
     if platform_archive:
         script = _script("restore-platform.sh")
         if not script:
@@ -606,10 +630,11 @@ def cmd_restore(file: str, yes: bool = False) -> int:
         ui.ok("Full platform restore completed. The original service state was preserved.")
         return 0
     try:
-        with path.open("rb") as fh:
-            if fh.read(16) != _SQLITE_MAGIC:
-                ui.error("This file is not a valid SQLite database or platform archive.")
-                return 2
+        if not encrypted_database:
+            with path.open("rb") as fh:
+                if fh.read(16) != _SQLITE_MAGIC:
+                    ui.error("This file is not a valid SQLite database or platform archive.")
+                    return 2
     except PermissionError:
         ui.warn("Cannot inspect the file (permission denied); the restore script will validate it.")
     script = _script("restore.sh")
@@ -642,7 +667,7 @@ def cmd_update(
     if channel == "dev":
         channel = "beta"
     if channel not in {"stable", "beta"}:
-        ui.error("Update channel must be stable or beta.")
+        ui.error("Update channel must be stable, beta or dev.")
         return 2
     command = ["bash", str(script), "--channel", channel, "--repo", repo or GITHUB_REPO]
     if version:

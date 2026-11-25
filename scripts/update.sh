@@ -17,7 +17,17 @@ set -Eeuo pipefail
 umask 077
 
 ROOT="${ZIKO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-REPO="${ZIKO_REPO:-OWNER/REPOSITORY}"
+REPO="${ZIKO_REPO:-}"
+if [[ -z "$REPO" && -r "$ROOT/deploy/release.conf" ]]; then
+  # This file is maintained by the project and contains only simple KEY=VALUE entries.
+  while IFS='=' read -r key value; do
+    [[ "$key" == "ZIKO_REPO" ]] || continue
+    value="${value%$'\\r'}"
+    [[ -n "$value" ]] && REPO="$value"
+    break
+  done < "$ROOT/deploy/release.conf"
+fi
+REPO="${REPO:-soheilbahor/ziko-auto-reply-bot}"
 SERVICE="${ZIKO_SERVICE:-ziko}"
 SERVICE_USER="${ZIKO_USER:-ziko}"
 BASE_URL="${ZIKO_BASE_URL:-https://github.com}"
@@ -93,7 +103,7 @@ install_requirements() {
     (
       umask 022
       "$ROOT/.venv/bin/python" -m pip install --disable-pip-version-check \
-        --force-reinstall --no-cache-dir "cryptography>=42,<47"
+        --force-reinstall --no-cache-dir "cryptography>=46.0.7,<51"
     )
     chmod -R a+rX "$site_packages"
   fi
@@ -130,10 +140,19 @@ rollback() {
   fi
   if [[ "$STARTED_NEW" -eq 1 && "$platform_restored" -eq 0 && -n "$DB_BACKUP" && -f "$DB_BACKUP" ]]; then
     local db="$DB_PATH"
+    local rollback_db="$WORK/rollback.sqlite3"
+    local identity="${ZIKO_AGE_IDENTITY:-/etc/ziko-assistant/backup-age-identity}"
     rm -f -- "$db-wal" "$db-shm"
     install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$(dirname "$db")"
-    install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 600 "$DB_BACKUP" "$db" \
-      || warn "database restore failed; backup: $DB_BACKUP"
+    if [[ -f "$DB_BACKUP.sha256" && -f "$identity" && ! -L "$identity" ]] \
+       && [[ "$(stat -c '%u:%a' "$identity")" =~ ^0:(400|600)$ ]] \
+       && (cd "$(dirname "$DB_BACKUP")" && sha256sum -c "$(basename "$DB_BACKUP").sha256") \
+       && age -d -i "$identity" -o "$rollback_db" "$DB_BACKUP"; then
+      install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 600 "$rollback_db" "$db" \
+        || warn "database restore failed; backup: $DB_BACKUP"
+    else
+      warn "encrypted database rollback could not be verified or decrypted; backup: $DB_BACKUP"
+    fi
   fi
   if [[ "$STOPPED" -eq 1 ]]; then
     systemctl start "$SERVICE" || warn "could not start $SERVICE after rollback"
@@ -144,7 +163,12 @@ rollback() {
 }
 
 # shellcheck disable=SC2317
-cleanup() { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf -- "$WORK"; }
+cleanup() {
+  [[ -n "$WORK" && -d "$WORK" ]] && rm -rf -- "$WORK"
+  if [[ -n "$DB_BACKUP" && -f "$DB_BACKUP" && ! -f "$DB_BACKUP.sha256" ]]; then
+    rm -f -- "$DB_BACKUP"
+  fi
+}
 
 # shellcheck disable=SC2317
 on_error() {
@@ -255,6 +279,10 @@ main() {
     (cd "$WORK" && grep -F -- "  $asset" SHA256SUMS | sha256sum -c --status -) \
       || die "SHA-256 mismatch - refusing to install"
     log "SHA-256 checksum OK"
+    command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is required to verify release provenance; install gh and retry."
+    gh attestation verify "$WORK/$asset" --repo "$REPO" \
+      || die "GitHub artifact attestation verification failed - refusing to install"
+    log "GitHub build provenance attestation verified"
   fi
 
   if tar -tzf "$WORK/$asset" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
@@ -269,21 +297,36 @@ main() {
   if [[ -n "$(find "$WORK/stage" \( -name '.env' -o -name '*.sqlite*' -o -name '*.db' \) -print -quit)" ]]; then
     die "release contains .env or database files - refusing to install"
   fi
-  printf '%s\n' "$TAG" > "$WORK/stage/VERSION"
+  if [[ "$CHANNEL" == "stable" ]]; then
+    local archive_version="unknown"
+    [[ -s "$WORK/stage/VERSION" ]] || die "release archive is missing VERSION"
+    archive_version="$(tr -d '[:space:]' < "$WORK/stage/VERSION")"
+    archive_version="${archive_version#v}"
+    [[ "$archive_version" == "$target_version" ]] \
+      || die "release archive VERSION ($archive_version) does not match tag ($target_version)"
+  else
+    printf '%s\n' "$TAG" > "$WORK/stage/VERSION"
+  fi
 
   # ---- from here on a failure triggers rollback ----
   trap 'on_error $LINENO' ERR
   trap 'warn "interrupted"; if [[ "$STOPPED" -eq 1 ]]; then rollback; fi; exit 130' INT TERM
 
-  local stamp; stamp="$(date -u +%Y%m%dT%H%M%S)-$$)"
+  local stamp; stamp="$(date -u +%Y%m%dT%H%M%S)-$$"
   install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$BACKUP_DIR" "$(dirname "$DB_PATH")"
 
   if [[ -f "$ROOT/scripts/backup.sh" && -f "$ROOT/scripts/restore-platform.sh" ]]; then
-    log "creating verified full-platform pre-update backup"
+    log "creating encrypted full-platform pre-update backup"
+    [[ -n "${ZIKO_AGE_RECIPIENT:-}" ]] || die "Set ZIKO_AGE_RECIPIENT before updating; encrypted platform backup is mandatory."
+    command -v age >/dev/null 2>&1 || die "age is required for encrypted pre-update backups."
+    local age_identity="${ZIKO_AGE_IDENTITY:-/etc/ziko-assistant/backup-age-identity}"
+    [[ -f "$age_identity" && ! -L "$age_identity" ]] || die "Install the root-only age identity before updating: $age_identity"
+    [[ "$(stat -c '%u:%a' "$age_identity")" =~ ^0:(400|600)$ ]] || die "age identity must be root-owned with mode 0400 or 0600."
     local backup_output
     backup_output="$(run_as_service_user env ZIKO_APP_DIR="$ROOT" \
       ZIKO_ENV_FILE="${ZIKO_ENV_FILE:-/etc/ziko-assistant/ziko.env}" \
       ZIKO_DB_PATH="$DB_PATH" ZIKO_BACKUP_DIR="$BACKUP_DIR" \
+      ZIKO_AGE_RECIPIENT="${ZIKO_AGE_RECIPIENT:-}" \
       bash "$ROOT/scripts/backup.sh" "$BACKUP_DIR")" \
       || die "full-platform pre-update backup failed; update cancelled"
     printf '%s\n' "$backup_output"
@@ -301,8 +344,9 @@ main() {
   STOPPED=1
 
   if [[ -f "$DB_PATH" ]]; then
-    DB_BACKUP="$BACKUP_DIR/ziko-pre-update-$stamp.sqlite3"
-    run_as_service_user "$ROOT/.venv/bin/python" - "$DB_PATH" "$DB_BACKUP" <<'PY'
+    local db_backup_plain="$BACKUP_DIR/.ziko-pre-update-$stamp.sqlite3"
+    DB_BACKUP="$BACKUP_DIR/ziko-pre-update-$stamp.sqlite3.age"
+    run_as_service_user "$ROOT/.venv/bin/python" - "$DB_PATH" "$db_backup_plain" <<'PY'
 import sqlite3, sys
 src = sqlite3.connect(sys.argv[1]); dst = sqlite3.connect(sys.argv[2])
 try:
@@ -312,11 +356,14 @@ try:
 finally:
     dst.close(); src.close()
 PY
+    chmod 600 "$db_backup_plain"
+    run_as_service_user age -r "$ZIKO_AGE_RECIPIENT" -o "$DB_BACKUP" "$db_backup_plain"
+    rm -f -- "$db_backup_plain"
     chmod 600 "$DB_BACKUP"
     (cd "$BACKUP_DIR" && sha256sum "$(basename "$DB_BACKUP")" > "$(basename "$DB_BACKUP").sha256")
     chown "$SERVICE_USER:$SERVICE_USER" "$DB_BACKUP.sha256"
     chmod 600 "$DB_BACKUP.sha256"
-    log "database backup: $DB_BACKUP"
+    log "encrypted database backup: $DB_BACKUP"
   else
     warn "no database found at $DB_PATH - skipping database backup"
   fi

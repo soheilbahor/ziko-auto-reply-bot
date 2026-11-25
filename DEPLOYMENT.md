@@ -64,18 +64,23 @@ database, backup, and script paths use the canonical paths above.
 While the service is running:
 
 ```bash
-sudo ziko backup
+sudo ZIKO_AGE_RECIPIENT='age1...' ziko backup
 ```
 
 The backup uses SQLite's online backup API, so committed WAL content is included in a
-consistent snapshot. It validates integrity and foreign keys, publishes a uniquely named
-SQLite file, and writes a SHA256 sidecar. Keep both files together and protect backups as
-sensitive data.
+consistent snapshot. Both the standalone database backup (`.sqlite3.age`) and the complete
+platform archive (`.tar.gz.age`) are encrypted with age and receive SHA256 sidecars.
+Keep each encrypted artifact with its sidecar and store the matching private age identity
+separately from the backup destination.
 
 ## Restore
 
 ```bash
-sudo ziko restore /var/backups/ziko-assistant/ziko-....sqlite3
+sudo ZIKO_AGE_IDENTITY=/etc/ziko-assistant/backup-age-identity \
+  ziko restore /var/backups/ziko-assistant/ziko-....sqlite3.age
+
+sudo ZIKO_AGE_RECIPIENT='age1...' \
+  ziko restore /var/backups/ziko-assistant/ziko-platform-....tar.gz.age
 ```
 
 Restore requires a valid `.sha256` sidecar and an explicit `RESTORE` confirmation. It validates
@@ -104,3 +109,48 @@ replacing application code and keeps bounded code snapshots.
 - Uninstall preserves configuration, database and backups by default. Data deletion requires
   the explicit `--purge-data` option and an interactive `DELETE ZIKO DATA` confirmation.
 - No inbound listener is opened. Do not change SSH or firewall settings as part of this install.
+
+
+## Encrypted platform backups (v1.2.0)
+
+Create a dedicated age identity before the first backup or upgrade of an existing
+installation:
+
+```bash
+sudo age-keygen -o /etc/ziko-assistant/backup-age-identity
+sudo chown root:root /etc/ziko-assistant/backup-age-identity
+sudo chmod 600 /etc/ziko-assistant/backup-age-identity
+sudo age-keygen -y /etc/ziko-assistant/backup-age-identity
+```
+
+Copy the printed `age1...` public recipient into your secure operator environment.
+Keep an offline copy of the private identity outside the server and outside the
+backup destination.
+Full-platform backups now require `age` and a public recipient. Install `age`
+on the server, then provide `ZIKO_AGE_RECIPIENT` when running the backup or
+updater (the update command now refuses to proceed without it) (for example, `sudo ZIKO_AGE_RECIPIENT='age1...' ziko backup`).
+The generated `ziko-platform-*.tar.gz.age` contains the main database, tenant
+registry, tenant-token.key, and tenant databases. Only the encrypted archive
+and its SHA256 sidecar are published; the plaintext staging archive is removed.
+
+Keep the matching age identity private and separate from the server backup.
+The default restore identity path is
+`/etc/ziko-assistant/backup-age-identity`; override it with
+`ZIKO_AGE_IDENTITY`. The identity must be root-owned and mode `0400` or `0600`. Restore verifies the SHA256 sidecar before decryption.
+Legacy unencrypted platform archives are rejected unless the operator
+explicitly sets `ZIKO_ALLOW_LEGACY_PLAINTEXT_BACKUP=1` for that restore.
+
+
+### Release provenance verification
+
+Stable-channel updates verify the GitHub build-provenance attestation after the
+published SHA256 checksum succeeds. Install a current GitHub CLI (`gh`) on the
+server (`sudo apt install gh`) before using stable updates. Beta snapshots are
+not release archives and remain limited to HTTPS plus the pinned source commit;
+they do not claim a release attestation.
+
+
+The GitHub bootstrap installer also requires the GitHub CLI (`gh`) and verifies
+the release provenance attestation after the SHA256 check. Install `gh` before
+running `scripts/install-from-github.sh`; a checksum alone is not treated as
+publisher authenticity.

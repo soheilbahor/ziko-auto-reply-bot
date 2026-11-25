@@ -18,16 +18,20 @@ DB="${DB:-/var/lib/ziko-assistant/ziko.sqlite3}"
 PY="$APP_DIR/.venv/bin/python"
 [[ -x "$PY" ]] || PY="$(command -v python3 || true)"
 [[ -n "$PY" ]] || die "No Python interpreter found."
+: "${ZIKO_AGE_RECIPIENT:?Set ZIKO_AGE_RECIPIENT before creating backups.}"
+command -v age >/dev/null 2>&1 || die "age is required for encrypted backups (install the age package)."
 install -d -m 700 "$DEST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-# mktemp atomically allocates a unique final name even for concurrent same-second runs.
+# Reserve a unique basename; both the SQLite and full-platform artifacts are encrypted.
 RESERVED="$(mktemp --suffix=.sqlite3 "$DEST/${PREFIX}-${STAMP}.XXXXXX")"
-OUT="$RESERVED"
+OUT="${RESERVED}.age"
+rm -f -- "$RESERVED"
+[[ ! -e "$OUT" && ! -L "$OUT" ]] || die "Encrypted backup destination already exists: $OUT"
 BASE="$(basename "$OUT")"
 TMP="$(mktemp "$DEST/.${BASE}.tmp.XXXXXX")"
 SUMTMP="$(mktemp "$DEST/.${BASE}.sha256.XXXXXX")"
 PUBLISHED=0
-cleanup(){ rm -f -- "$TMP" "$SUMTMP"; [[ "$PUBLISHED" -eq 1 ]] || rm -f -- "$OUT"; }
+cleanup(){ rm -f -- "$TMP" "$SUMTMP" "$RESERVED"; [[ "$PUBLISHED" -eq 1 ]] || rm -f -- "$OUT"; }
 trap cleanup EXIT
 "$PY" - "$DB" "$TMP" <<'PY'
 import sqlite3,sys
@@ -48,25 +52,32 @@ try:
 finally: check.close()
 PY
 chmod 600 "$TMP"
-mv -f -- "$TMP" "$OUT"
-PUBLISHED=1
+age -r "$ZIKO_AGE_RECIPIENT" -o "$OUT" "$TMP"
+chmod 600 "$OUT"
+rm -f -- "$TMP"
 (cd "$DEST" && sha256sum "$BASE" > "$SUMTMP")
 chmod 600 "$SUMTMP"
 mv -- "$SUMTMP" "$OUT.sha256"
 if [[ $EUID -eq 0 ]] && id -u ziko >/dev/null 2>&1; then
  chown ziko:ziko "$OUT" "$OUT.sha256"
 fi
-echo "Backup created and verified: $OUT"
+PUBLISHED=1
+echo "Encrypted database backup created and verified: $OUT"
 # Full platform snapshot: main DB, child-bot registry/key, and isolated tenant DBs.
 DATA_DIR="$(dirname "$DB")"
 REGISTRY_DB="$DATA_DIR/tenants.sqlite3"
 TENANT_KEY="$DATA_DIR/tenant-token.key"
 TENANT_DIR="$DATA_DIR/tenants"
+PLATFORM_ARCHIVE="$DEST/ziko-platform-${STAMP}-$$.tar.gz.age"
+[[ ! -e "$PLATFORM_ARCHIVE" && ! -L "$PLATFORM_ARCHIVE" && ! -e "$PLATFORM_ARCHIVE.sha256" ]] \
+  || die "Platform backup destination already exists: $PLATFORM_ARCHIVE"
 PLATFORM_TMP="$(mktemp -d "$DEST/.ziko-platform.XXXXXX")"
-PLATFORM_ARCHIVE="$DEST/ziko-platform-${STAMP}-$$.tar.gz"
+PLATFORM_PLAINTEXT="$(mktemp "$DEST/.ziko-platform-${STAMP}-$$.XXXXXX.tar.gz")"
+PLATFORM_ENCRYPTED_TMP="${PLATFORM_ARCHIVE}.tmp"
 PLATFORM_PUBLISHED=0
 platform_cleanup() {
   rm -rf -- "$PLATFORM_TMP"
+  rm -f -- "$PLATFORM_PLAINTEXT" "$PLATFORM_ENCRYPTED_TMP"
   [[ "$PLATFORM_PUBLISHED" -eq 1 ]] || rm -f -- "$PLATFORM_ARCHIVE" "$PLATFORM_ARCHIVE.sha256"
 }
 trap 'cleanup; platform_cleanup' EXIT
@@ -110,12 +121,19 @@ fi
 if [[ -f "$PLATFORM_TMP/registry.sqlite3" && ! -f "$PLATFORM_TMP/tenant-token.key" ]]; then
   die "Tenant registry exists but its encryption key is missing; platform backup refused."
 fi
-tar -czf "$PLATFORM_ARCHIVE" -C "$PLATFORM_TMP" .
-chmod 600 "$PLATFORM_ARCHIVE"
+: "${ZIKO_AGE_RECIPIENT:?Set ZIKO_AGE_RECIPIENT to an age public recipient before creating platform backups.}"
+command -v age >/dev/null 2>&1 || die "age is required for encrypted platform backups (install the age package)."
+tar -czf "$PLATFORM_PLAINTEXT" -C "$PLATFORM_TMP" .
+chmod 600 "$PLATFORM_PLAINTEXT"
+age -r "$ZIKO_AGE_RECIPIENT" -o "$PLATFORM_ENCRYPTED_TMP" "$PLATFORM_PLAINTEXT"
+chmod 600 "$PLATFORM_ENCRYPTED_TMP"
+mv -- "$PLATFORM_ENCRYPTED_TMP" "$PLATFORM_ARCHIVE"
+rm -f -- "$PLATFORM_PLAINTEXT"
 (cd "$DEST" && sha256sum "$(basename "$PLATFORM_ARCHIVE")" > "$PLATFORM_ARCHIVE.sha256")
 chmod 600 "$PLATFORM_ARCHIVE.sha256"
 if [[ $EUID -eq 0 ]] && id -u ziko >/dev/null 2>&1; then
   chown ziko:ziko "$PLATFORM_ARCHIVE" "$PLATFORM_ARCHIVE.sha256"
 fi
 PLATFORM_PUBLISHED=1
+echo "Backup encryption: age"
 echo "Full platform backup created and verified: $PLATFORM_ARCHIVE"

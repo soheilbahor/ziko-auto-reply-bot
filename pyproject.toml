@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ziko-assistant"
-version = "1.1.0"
+dynamic = ["version"]
 description = "ZIKO Personal Assistant: Telegram Business auto-reply assistant"
 requires-python = ">=3.12"
 dependencies = [
     "aiogram==3.34.0",
     "aiosqlite==0.22.1",
     "rich>=13.7,<15",
-    "cryptography>=42,<47",
+    "cryptography>=46.0.7,<51",
 ]
 
 [project.scripts]
@@ -30,3 +30,6 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.setuptools.dynamic]
+version = {file = ["VERSION"]}

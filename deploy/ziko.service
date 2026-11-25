@@ -2,6 +2,8 @@
 Description=ZIKO Telegram Business Assistant
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -22,6 +24,19 @@ ReadWritePaths=/var/lib/ziko-assistant
 CapabilityBoundingSet=
 LockPersonality=true
 MemoryDenyWriteExecute=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

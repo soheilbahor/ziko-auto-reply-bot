@@ -1,10 +1,10 @@
 # ZIKO Personal Assistant
 
-[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
-[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
-[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
+[![Latest Stable Release](https://img.shields.io/github/v/release/soheilbahor/ziko-auto-reply-bot?label=stable)](https://github.com/soheilbahor/ziko-auto-reply-bot/releases/latest)
+[![CI](https://github.com/soheilbahor/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/soheilbahor/ziko-auto-reply-bot/actions/workflows/ci.yml)
+[![Release](https://github.com/soheilbahor/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/soheilbahor/ziko-auto-reply-bot/actions/workflows/release.yml)
 
-**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
+**Repository:** [soheilbahor/ziko-auto-reply-bot](https://github.com/soheilbahor/ziko-auto-reply-bot) Â· [Releases](https://github.com/soheilbahor/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/soheilbahor/ziko-auto-reply-bot/issues)
 
 [English](README.en.md) · **فارسی**
 
@@ -13,9 +13,9 @@
 
 زیکو یک ربات «متصل به حساب کسب‌وکار» (Connected Business Bot) است. وقتی وضعیت خود را (مثلاً «در حال خواب») انتخاب می‌کنید، به پیام‌های خصوصی تازه‌ای که به حساب شما می‌رسد، **یک‌بار در هر نشست و برای هر چت**، پاسخ خودکارِ همان وضعیت را از طرف شما می‌فرستد.
 
-> ⚠️ وضعیت پروژه: پیش از نسخهٔ ۱.۰.۰. گزارش اجرای واقعی آزمون‌ها در [`QA_REPORT.md`](QA_REPORT.md) آمده است و هر مورد «اجرا‌نشده» در آن هنوز باید در CI یا روی Python 3.12 اجرا شود.
+> ⚠️ وضعیت پروژه: نسخهٔ ۱.۲.۰ در حال آماده‌سازی است. گزارش آزمون‌ها در [`docs/reports/QA_REPORT.md`](docs/reports/QA_REPORT.md) و گزارش فاز امنیت در [`docs/PHASE1_SECURITY_REPORT.md`](docs/PHASE1_SECURITY_REPORT.md) قرار دارد. تا پایان CI و آزمون روی Ubuntu 24.04، این نسخه Production تأییدشده نیست.
 
-گزارش ادغام پنج بسته و وضعیت آزمون‌ها: [`MERGE_TEST_REPORT.md`](MERGE_TEST_REPORT.md).
+گزارش ادغام و آزمون‌های قبلی: [`docs/reports/MERGE_TEST_REPORT.md`](docs/reports/MERGE_TEST_REPORT.md).
 
 ## فهرست
 
@@ -65,13 +65,13 @@ Telegram Bot API (HTTPS، long polling)
 | بخش | نقش |
 |---|---|
 | `app/config.py` | خواندن و اعتبارسنجی `.env` (بدون نمایش توکن در خطاها) |
-| `app/storage.py`, `app/models.py` | لایهٔ SQLite و قرارداد داده (رجوع به [`MODULE1_CONTRACT.md`](MODULE1_CONTRACT.md)) |
+| `app/storage.py`, `app/models.py` | لایهٔ SQLite و قرارداد داده (رجوع به [`docs/specs/MODULE1_CONTRACT.md`](docs/specs/MODULE1_CONTRACT.md)) |
 | `app/services/auto_reply.py` | منطق نشست، یک‌بار پاسخ‌دادن و تصفیهٔ نتیجهٔ ارسال |
 | `app/handlers/` | روترهای aiogram برای مدیریت و پیام‌های Business |
 | `deploy/ziko.service` | واحد systemd |
 | `scripts/` | `backup.sh`، `restore.sh`، `update.sh` |
 
-جزئیات بیشتر: [`INTEGRATION_REPORT.md`](INTEGRATION_REPORT.md)، [`SECURITY.md`](SECURITY.md)، [`DEPLOYMENT.md`](DEPLOYMENT.md).
+جزئیات بیشتر: [`docs/reports/INTEGRATION_REPORT.md`](docs/reports/INTEGRATION_REPORT.md)، [`SECURITY.md`](SECURITY.md)، [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## پیش‌نیازها
 
@@ -84,18 +84,17 @@ Telegram Bot API (HTTPS، long polling)
 
 ### نصب یک‌خطی از GitHub
 
-ابتدا `ziko-freedom/ziko-auto-reply-bot` را با نام واقعی مخزن عمومی GitHub جایگزین کنید. این دستور
+مخزن رسمی ZIKO برابر `soheilbahor/ziko-auto-reply-bot` است. این دستور
 پیش‌نیازهای Ubuntu 24.04 را نصب می‌کند، آخرین Release را از GitHub دریافت می‌کند،
 SHA-256 فایل انتشار را بررسی می‌کند و سپس نصب‌کنندهٔ تعاملی را اجرا می‌کند:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/ziko-freedom/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- ziko-freedom/ziko-auto-reply-bot'
+sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl ca-certificates tar age gh && bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/install-from-github.sh | sudo bash -s -- soheilbahor/ziko-auto-reply-bot'
 ```
 
 نصب‌کننده توکن ربات را با ورودی مخفی می‌گیرد؛ توکن در خط فرمان، لاگ یا فایل systemd
 قرار نمی‌گیرد. اگر فایل تنظیمات یا دیتابیس قبلاً وجود داشته باشد، بدون تأیید صریح
-جایگزین نمی‌شود. این فرمان تا زمان تعیین مخزن واقعی و انتشار اولین Release قابل اجرا
-نیست؛ placeholder را عیناً استفاده نکنید.
+جایگزین نمی‌شود. اجرای نصب از GitHub به انتشار یک Release معتبر نیاز دارد. تا زمان انتشار Release نسخهٔ ۱.۲.۰، از بستهٔ ZIP آزمایشی و فقط در محیط تست استفاده کنید.
 
 برای نصب از فایل Release دانلودشده نیز می‌توانید `install.sh` را از پوشهٔ استخراج‌شده
 با `sudo ./install.sh` اجرا کنید. جزئیات مسیرها و rollback در [`DEPLOYMENT.md`](DEPLOYMENT.md) آمده است.
@@ -141,107 +140,65 @@ sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv curl c
 | `sudo systemctl status ziko` | وضعیت سرویس |
 | `sudo systemctl restart ziko` | راه‌اندازی مجدد |
 | `journalctl -u ziko -f` | مشاهدهٔ زندهٔ لاگ |
-| `sudo ziko backup` | پشتیبان‌گیری از پایگاه داده |
-| `sudo ziko restore فایل.sqlite3` | بازیابی پایگاه داده |
-| `sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot [--version vX.Y.Z]` | به‌روزرسانی از Release |
+| `sudo ZIKO_AGE_RECIPIENT=age1... ziko backup` | پشتیبان‌گیری رمزنگاری‌شده |
+| `sudo ziko restore فایل.sqlite3.age` یا `فایل.tar.gz.age` | بازیابی دیتابیس یا کل پلتفرم |
+| `sudo ziko update --repo soheilbahor/ziko-auto-reply-bot [--version vX.Y.Z]` | به‌روزرسانی از Release |
 | `pytest -ra` | اجرای آزمون‌ها |
 
 ## به‌روزرسانی
 
 ```bash
-sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot
-# یا نسخهٔ مشخص:
+# کانال پایدار؛ مخزن از deploy/release.conf خوانده می‌شود
+sudo ziko update --channel stable
 
-[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
-[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
-[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
+# نسخه مشخص
+sudo ziko update --channel stable --version v1.2.1
 
-**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
-sudo ziko update --repo ziko-freedom/ziko-auto-reply-bot --version v1.0.0
+# بررسی بدون اعمال تغییر
+sudo ziko update --channel stable --check
+
+# override اختیاری مخزن
+sudo ziko update --repo soheilbahor/ziko-auto-reply-bot
 ```
 
-اسکریپت به‌ترتیب:
+Updater برای Release پایدار، SHA-256 و GitHub Artifact Attestation را بررسی می‌کند.
+برای اجرای Update باید `gh` نصب باشد. پیش از Update، آرشیو کامل پلتفرم با `age`
+رمزنگاری می‌شود؛ بنابراین `age` و متغیر `ZIKO_AGE_RECIPIENT` باید در محیط اجرای
+فرمان در دسترس باشند. کلید خصوصی age باید جدا از محل Backup نگهداری شود.
 
-1. آخرین Release (یا نسخهٔ خواسته‌شده) را دانلود می‌کند و **SHA-256** را با فایل `SHA256SUMS` همان Release تطبیق می‌دهد؛ در صورت مغایرت چیزی نصب نمی‌شود.
-2. سرویس را متوقف می‌کند و از پایگاه داده نسخهٔ پشتیبان می‌گیرد (`/var/backups/ziko-assistant/ziko-pre-update-*.sqlite3`) و از کد فعلی نیز یک اسنپ‌شات (`/var/backups/ziko-assistant/code-*.tar.gz`) می‌سازد.
-3. کد را جایگزین می‌کند و **`.env`، `data/`، `.venv` و `backups/` را دست‌نخورده می‌گذارد**؛ سپس وابستگی‌ها را نصب می‌کند.
-4. سرویس را راه می‌اندازد و چند ثانیه سلامتش را می‌سنجد.
-5. در صورت هر خطا، **خودکار برمی‌گردد**: کد قبلی، وابستگی‌های قبلی و (در صورت شروع نسخهٔ جدید) پایگاه داده از پشتیبان بازیابی می‌شود و سرویس دوباره بالا می‌آید.
-
-نکته‌ها: SHA-256 فقط سلامت دانلود را تضمین می‌کند، نه اینکه Release معتبر باشد؛ به مخزن و مالک آن اعتماد کنید. پیام‌هایی که در بازهٔ کوتاه تلاشِ ناموفق پردازش شده باشند، پس از بازگشت پایگاه داده از دست می‌روند. اگر `.env.example` کلید تازه‌ای داشته باشد، اسکریپت هشدار می‌دهد؛ `.env` را خودتان به‌روز کنید.
+در صورت خطا، مسیر Rollback کد، وابستگی‌ها و داده‌های پلتفرم را بازیابی می‌کند.
+جزئیات تنظیم age و مسیرهای بازیابی در [`DEPLOYMENT.md`](DEPLOYMENT.md) آمده است.
 
 ## پشتیبان‌گیری و بازیابی
 
-```bash
-# پشتیبان‌گیری (با SQLite Online Backup؛ سرویس می‌تواند روشن بماند)
-
-[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
-[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
-[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
-
-**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
-sudo ziko backup
-
-# بازیابی (سرویس را متوقف، DB فعلی را با پسوند .pre-restore.<زمان> نگه می‌دارد و راه‌اندازی می‌کند)
-
-[![Latest Stable Release](https://img.shields.io/github/v/release/ziko-freedom/ziko-auto-reply-bot?label=stable)](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases/latest)
-[![CI](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/ci.yml)
-[![Release](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml/badge.svg)](https://github.com/ziko-freedom/ziko-auto-reply-bot/actions/workflows/release.yml)
-
-**Repository:** [ziko-freedom/ziko-auto-reply-bot](https://github.com/ziko-freedom/ziko-auto-reply-bot) Â· [Releases](https://github.com/ziko-freedom/ziko-auto-reply-bot/releases) Â· [Issues](https://github.com/ziko-freedom/ziko-auto-reply-bot/issues)
-sudo ziko restore /var/backups/ziko-assistant/ziko-YYYYMMDDTHHMMSSZ-XXXXXX.sqlite3
-```
-
-- پشتیبان شامل فرادادهٔ اتصال است؛ آن را **حساس** در نظر بگیرید، رمزنگاری کنید و بیرون از سرور نگه دارید.
-- پشتیبان‌ها هرگز نباید در Git قرار بگیرند (`backups/` و `*.sqlite3` در `.gitignore` هستند).
-- بعد از بازیابی، لاگ سرویس و پنل مدیریت را بررسی کنید.
-
-## عیب‌یابی
-
-| نشانه | بررسی |
-|---|---|
-| سرویس بالا نمی‌آید | `journalctl -u ziko -n 100`؛ خطای `BOT_TOKEN`/`ADMIN_IDS` یعنی `.env` ناقص یا نامعتبر است. |
-| ربات به `/start` جواب نمی‌دهد | شناسهٔ شما در `ADMIN_IDS` نیست، یا توکن اشتباه است. |
-| «ربات هنوز متصل نشده» | مراحل اتصال Business را تکرار کنید؛ Business Mode در BotFather و Premium بودن حساب را بررسی کنید. |
-| اتصال هست ولی پاسخی ارسال نمی‌شود | پاسخ خودکار خاموش است یا وضعیت فعال نشده؛ مجوز «پاسخ‌دادن» (`can_reply`) داده نشده؛ اتصال غیرفعال است؛ برای همان چت در این نشست قبلاً پاسخ داده شده. |
-| ارسال یک‌بار «نامطمئن» ثبت شد | طبق طراحی (حداکثر یک‌بار) دوباره تلاش نمی‌شود؛ جزئیات: [`MODULE1_CONTRACT.md`](MODULE1_CONTRACT.md). |
-| `Permission denied` روی `data/` | مالک `data/` باید `ziko` و مجوز `700` باشد. |
-| به‌روزرسانی: `SHA-256 mismatch` | دانلود خراب یا Release دستکاری شده؛ نصب انجام نشده است. دوباره امتحان کنید یا به مالک مخزن اطلاع دهید. |
-| به‌روزرسانی: برگشت خودکار | لاگ را ببینید: `journalctl -u ziko`؛ پشتیبان‌ها در `backups/` هستند. |
-| `pip install` در محیط بدون اینترنت شکست می‌خورد | دسترسی سرور به PyPI لازم است. |
-
-## امنیت و حریم خصوصی
-
-- هیچ توکن، `.env`، پایگاه داده یا پشتیبانی در مخزن commit نمی‌شود؛ CI این را بررسی می‌کند.
-- متن پیام مخاطبان ذخیره یا لاگ نمی‌شود.
-- جزئیات تهدیدها و کنترل‌ها: [`SECURITY.md`](SECURITY.md). گزارش آسیب‌پذیری: به‌صورت خصوصی به مالک مخزن (روش تماس پس از انتشار مشخص می‌شود).
-
-## توسعه و آزمون
+هم بکاپ مستقل دیتابیس (`.sqlite3.age`) و هم آرشیو کامل پلتفرم (`.tar.gz.age`)
+با `age` رمزنگاری می‌شوند. آرشیو کامل شامل دیتابیس اصلی، رجیستری ربات‌های زیرمجموعه،
+کلید رمزنگاری و دیتابیس‌های مستقل آن‌هاست.
 
 ```bash
-python3.12 -m venv .venv && . .venv/bin/activate
-pip install -r requirements-dev.txt
-pytest -ra
-ZIKO_STRICT=1 pytest -ra      # شرط انتشار: صفر مورد skip
+# ایجاد بکاپ‌ها با کلید عمومی age
+sudo ZIKO_AGE_RECIPIENT='age1...' ziko backup
+
+# بازیابی دیتابیس مستقل
+sudo ZIKO_AGE_RECIPIENT='age1...' ZIKO_AGE_IDENTITY=/etc/ziko-assistant/backup-age-identity ziko restore /var/backups/ziko-assistant/ziko-....sqlite3.age
+
+# بازیابی کامل پلتفرم
+sudo ZIKO_AGE_RECIPIENT='age1...' ZIKO_AGE_IDENTITY=/etc/ziko-assistant/backup-age-identity ziko restore /var/backups/ziko-assistant/ziko-platform-....tar.gz.age
 ```
 
-CI (`.github/workflows/ci.yml`) با Python 3.12 و وابستگی‌های واقعی پروژه، آزمون‌ها، Ruff، `bash -n` و ShellCheck را اجرا می‌کند. انتشار با تگ‌هایی مانند `v1.0.0` انجام می‌شود (`.github/workflows/release.yml`) و فایل‌های ZIP، tar.gz و `SHA256SUMS` را می‌سازد. تغییرات: [`CHANGELOG.md`](CHANGELOG.md).
+کلید خصوصی age باید root-owned با مجوز `0400` یا `0600` باشد و در همان محل Backup
+نگهداری نشود. فایل `.age` و فایل `.sha256` باید با هم نگهداری شوند. برای بازیابی
+آرشیوهای قدیمی و بدون رمزنگاری، فقط در صورت اعتماد کامل به فایل، متغیر
+`ZIKO_ALLOW_LEGACY_PLAINTEXT_BACKUP=1` را صریحاً تنظیم کنید. جزئیات در
+[`DEPLOYMENT.md`](DEPLOYMENT.md) آمده است.
 
-## مجوز
 
-**هنوز مجوزی انتخاب نشده است.** تا زمانی که مالک مخزن مجوز را تأیید و فایل `LICENSE` را اضافه نکند، همهٔ حقوق محفوظ است.
 
-## منابع رسمی
+### Child-bot polling capacity
 
-- Telegram Bot API: <https://core.telegram.org/bots/api>
-- aiogram: <https://docs.aiogram.dev/>
-
-## ربات‌های زیرمجموعه
-
-کاربران می‌توانند از داخل ربات مرکزی با دستور `/create_bot` یکی از دو روش را انتخاب کنند: ساخت خودکار از طریق لینک رسمی Telegram Managed Bots (با تأیید نهایی مشتری در تلگرام و دریافت خودکار توکن توسط ZIKO)، یا اتصال ربات موجود با دستور `/connect_bot` و ارسال خصوصی توکن. توکن‌های زیرمجموعه با Fernet رمزنگاری می‌شوند و هر ربات دیتابیس مستقل دارد. فعال بودن Bot Management Mode برای ربات مرکزی الزامی است.
-
-هر ربات دیتابیس SQLite مستقل دارد. مدیر اصلی می‌تواند با `/tenants` فهرست ربات‌ها و شناسه هرکدام را ببیند و با `/tenant_disable BOT_ID` یا `/tenant_enable BOT_ID` هر ربات را جداگانه متوقف یا فعال کند. اطلاعات ربات غیرفعال حذف نمی‌شود.
-
-`ziko bots list` فهرست ربات‌ها را در CLI نمایش می‌دهد. `ziko backup` علاوه بر بکاپ دیتابیس اصلی، آرشیو کامل پلتفرم شامل دیتابیس اصلی، فهرست ربات‌ها، کلید رمزنگاری و دیتابیس تمام ربات‌های زیرمجموعه می‌سازد. برای بازیابی کامل از `ziko restore /path/to/ziko-platform-....tar.gz` استفاده کنید.
-
-کلید `tenant-token.key` با مجوز `0600` نگهداری می‌شود؛ گم‌شدن آن باعث غیرقابل‌بازیابی‌شدن توکن‌های رمزنگاری‌شده خواهد شد. این قابلیت فعلاً برای استقرار تک‌سروری و تک‌نمونه‌ای طراحی شده است و هنوز ادعای مقیاس‌پذیری افقی ندارد.
+The default concurrent child-bot polling limit is 50, matching the default
+global tenant registration capacity. Operators may set
+`ZIKO_TENANT_MAX_CONCURRENT_POLLERS` to a lower positive integer to constrain
+resource use. Enabled bots that cannot acquire a slot remain queued; `/tenants`
+shows each bot's runtime polling state and reports active and waiting counts.
+The application logs queue entry and slot acquisition without logging bot tokens.

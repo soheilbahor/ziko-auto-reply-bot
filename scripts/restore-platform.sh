@@ -11,7 +11,7 @@ APP_GROUP="${ZIKO_GROUP:-ziko}"
 die(){ echo "[ziko-platform-restore] ERROR: $*" >&2; exit 1; }
 log(){ echo "[ziko-platform-restore] $*"; }
 [[ $EUID -eq 0 ]] || die "Run as root."
-[[ $# -eq 1 || ( $# -eq 2 && "$1" == "--yes" ) ]] || die "Usage: $0 [--yes] /path/to/ziko-platform-*.tar.gz"
+[[ $# -eq 1 || ( $# -eq 2 && "$1" == "--yes" ) ]] || die "Usage: $0 [--yes] /path/to/ziko-platform-*.tar.gz.age"
 if [[ $# -eq 2 ]]; then YES=1; ARCHIVE="$2"; else YES=0; ARCHIVE="$1"; fi
 [[ -f "$ARCHIVE" && ! -L "$ARCHIVE" ]] || die "Archive must be a regular non-symlink file."
 ARCHIVE="$(readlink -f -- "$ARCHIVE")"
@@ -67,8 +67,23 @@ rollback(){
 trap rollback ERR INT TERM
 trap cleanup EXIT
 
+SOURCE_ARCHIVE="$ARCHIVE"
+if [[ "$ARCHIVE" == *.age ]]; then
+  command -v age >/dev/null 2>&1 || die "age is required to decrypt this platform backup."
+  IDENTITY="${ZIKO_AGE_IDENTITY:-/etc/ziko-assistant/backup-age-identity}"
+  [[ -f "$IDENTITY" && ! -L "$IDENTITY" ]] || die "age identity file not found or is a symlink: $IDENTITY"
+  identity_owner_mode="$(stat -c '%u:%a' "$IDENTITY")"
+  [[ "$identity_owner_mode" =~ ^0:(400|600)$ ]] || die "age identity must be root-owned with mode 0400 or 0600."
+  DECRYPTED="$WORK/platform-backup.tar.gz"
+  age -d -i "$IDENTITY" -o "$DECRYPTED" "$ARCHIVE" || die "Could not decrypt platform backup; check the age identity."
+  chmod 600 "$DECRYPTED"
+  SOURCE_ARCHIVE="$DECRYPTED"
+else
+  [[ "${ZIKO_ALLOW_LEGACY_PLAINTEXT_BACKUP:-0}" == "1" ]] || die "Plaintext platform backups are disabled. Set ZIKO_ALLOW_LEGACY_PLAINTEXT_BACKUP=1 only for a trusted legacy archive."
+fi
+
 # Extract only known regular files; never delegate untrusted archive paths to tar.
-"$PY" - "$ARCHIVE" "$STAGE" <<'PYCODE'
+"$PY" - "$SOURCE_ARCHIVE" "$STAGE" <<'PYCODE'
 import os, re, shutil, sys, tarfile
 from pathlib import Path
 archive, destination = sys.argv[1], Path(sys.argv[2])

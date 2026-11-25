@@ -92,7 +92,7 @@ These cannot be proven by unit tests and must be checked on the server and recor
 
 ## 5. Known limits of the automated tests
 
-- The authoritative `MODULE1_CONTRACT.md` is included in this project. Its signatures and semantics are implemented by `app.storage.Database`; assumptions A10-A14 in the QA fixture were reconciled against that contract.
+- The authoritative `docs/specs/MODULE1_CONTRACT.md` is included in this project. Its signatures and semantics are implemented by `app.storage.Database`; assumptions A10-A14 in the QA fixture were reconciled against that contract.
 
 - Tests mock Telegram; they cannot prove behaviour against the live Bot API (for example the
   exact shape of `business_connection` rights in a given Bot API release). Verify the integration
@@ -116,3 +116,15 @@ These cannot be proven by unit tests and must be checked on the server and recor
 Child bot tokens are encrypted at rest with Fernet. The key is generated on first startup at `tenant-token.key` beside the configured database directory and is restricted to mode `0600`; the service account must retain exclusive access. Back up this key together with `tenants.sqlite3` and every database in `tenants/`. If the key is lost, encrypted tokens cannot be recovered. Never include the key or tenant database files in GitHub releases or support logs.
 
 Each child bot has a separate SQLite database file and its own admin allow-list containing only the registering Telegram user ID. The master bot stores only tenant metadata and encrypted child bot tokens. The current multi-bot runtime uses one long-polling task per child bot in one service process; it is an initial single-server design, not a claim of unlimited scale or multi-host failover.
+
+
+## Backup encryption
+
+Version 1.2.0 encrypts both standalone database backups and complete platform archives with age before publication.
+Configure `ZIKO_AGE_RECIPIENT` on backup/update invocations and store the
+matching private identity separately from the backup destination. Never put
+the age identity in the backup archive, source repository, or same storage
+account as the encrypted archive. The SHA256 sidecar detects accidental
+corruption; age recipient encryption protects confidentiality.
+
+The restore identity must be root-owned with mode `0400` or `0600`; the default path is `/etc/ziko-assistant/backup-age-identity`.

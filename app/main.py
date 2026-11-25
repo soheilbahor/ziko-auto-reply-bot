@@ -29,7 +29,7 @@ async def run() -> None:
     db = Database(settings.database_path)
     registry = TenantRegistry(settings.database_path.with_name("tenants.sqlite3"))
     bot = Bot(token=settings.bot_token)
-    manager = TenantBotManager(settings=settings, registry=registry)
+    manager = TenantBotManager(settings=settings, registry=registry, master_bot=bot)
     try:
         await db.initialize()
         await registry.initialize()

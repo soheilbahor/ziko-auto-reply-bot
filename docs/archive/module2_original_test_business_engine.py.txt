@@ -1,0 +1,322 @@
+"""Mocked unit tests for the Module 2 auto-reply engine.
+
+Run with:  python -m unittest discover -s tests -v   (or pytest)
+No real Telegram calls are made; the database is an in-memory fake that
+implements the shared contract semantics.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import unittest
+from types import SimpleNamespace
+
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
+from aiogram.methods import SendMessage
+
+from app.handlers.business import create_business_router
+from app.services.auto_reply import AutoReplyService, ConnectionOutcome, ReplyOutcome
+
+CONN = "conn-ABC-123456789"
+OWNER = 111
+OTHER_ADMIN = 222
+STRANGER = 555
+SECRET_BODY = "SECRET BODY TEXT"
+METHOD = SendMessage(chat_id=1, text="x")
+
+
+class FakeDatabase:
+    def __init__(self) -> None:
+        self.state = SimpleNamespace(enabled=True, active_status_key="sleeping", session_id="s1")
+        self.statuses = {"sleeping": SimpleNamespace(reply_text="در حال خواب هستم"), "gaming": SimpleNamespace(reply_text="در حال بازی")}
+        self.connection: SimpleNamespace | None = None
+        self.inbound: set[tuple[str, int, int]] = set()
+        self.replies: dict[tuple[str, int, str], dict] = {}
+
+    async def get_app_state(self):
+        return self.state
+
+    async def get_status(self, key):
+        return self.statuses.get(key)
+
+    async def save_business_connection(self, connection_id, is_enabled, can_reply, owner_user_id):
+        self.connection = SimpleNamespace(
+            connection_id=connection_id, is_enabled=is_enabled, can_reply=can_reply, owner_user_id=owner_user_id
+        )
+
+    async def get_business_connection(self):
+        return self.connection
+
+    async def claim_inbound_event(self, connection_id, chat_id, message_id):
+        key = (connection_id, chat_id, message_id)
+        if key in self.inbound:
+            return False
+        self.inbound.add(key)
+        return True
+
+    async def claim_reply(self, connection_id, chat_id, session_id):
+        key = (connection_id, chat_id, session_id)
+        if self.replies.get(key, {}).get("status") in ("pending", "sent"):
+            return False
+        self.replies[key] = {"status": "pending"}
+        return True
+
+    async def complete_reply(self, connection_id, chat_id, session_id, sent, telegram_message_id=None, error=None):
+        self.replies[(connection_id, chat_id, session_id)] = {
+            "status": "sent" if sent else "failed",
+            "message_id": telegram_message_id,
+            "error": error,
+        }
+
+
+class FakeTransport:
+    def __init__(self) -> None:
+        self.sends: list[dict] = []
+        self.script: list[BaseException | None] = []
+        self.fetch_result: SimpleNamespace | BaseException | None = None
+        self.fetch_calls = 0
+        self.block: asyncio.Event | None = None
+        self.started = asyncio.Event()
+
+    async def send_text(self, *, connection_id, chat_id, text):
+        self.started.set()
+        if self.block is not None:
+            await self.block.wait()
+        await asyncio.sleep(0)
+        outcome = self.script.pop(0) if self.script else None
+        if outcome is not None:
+            raise outcome
+        self.sends.append({"connection_id": connection_id, "chat_id": chat_id, "text": text})
+        return 9000 + len(self.sends)
+
+    async def fetch_connection(self, connection_id):
+        self.fetch_calls += 1
+        if isinstance(self.fetch_result, BaseException):
+            raise self.fetch_result
+        return self.fetch_result
+
+
+class Clock:
+    now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def make_message(*, msg_id=1, chat_id=STRANGER, sender_id=None, chat_type="private", is_bot=False, conn=CONN):
+    sender = None if sender_id is False else SimpleNamespace(id=sender_id or chat_id, is_bot=is_bot)
+    return SimpleNamespace(
+        business_connection_id=conn,
+        message_id=msg_id,
+        chat=SimpleNamespace(id=chat_id, type=chat_type),
+        from_user=sender,
+        text=SECRET_BODY,
+    )
+
+
+def make_connection(*, conn_id=CONN, owner=OWNER, enabled=True, can_reply=True, legacy=None, rights=True):
+    return SimpleNamespace(
+        id=conn_id,
+        user=SimpleNamespace(id=owner),
+        is_enabled=enabled,
+        rights=SimpleNamespace(can_reply=can_reply) if rights else None,
+        can_reply=legacy,
+    )
+
+
+class EngineTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.db = FakeDatabase()
+        self.tr = FakeTransport()
+        self.clock = Clock()
+        self.settings = SimpleNamespace(admin_ids=frozenset({OWNER, OTHER_ADMIN}))
+        self.svc = AutoReplyService(self.db, self.settings, clock=self.clock)
+        await self.db.save_business_connection(CONN, True, True, OWNER)
+
+    async def handle(self, **kwargs) -> ReplyOutcome:
+        return await self.svc.handle_business_message(make_message(**kwargs), self.tr)
+
+    # ---- connection updates ----
+    async def test_connection_saved_for_admin_owner(self):
+        self.db.connection = None
+        out = await self.svc.handle_business_connection(make_connection(can_reply=True))
+        self.assertIs(out, ConnectionOutcome.SAVED)
+        self.assertEqual((self.db.connection.connection_id, self.db.connection.can_reply, self.db.connection.owner_user_id), (CONN, True, OWNER))
+
+    async def test_connection_from_non_admin_ignored(self):
+        self.db.connection = None
+        out = await self.svc.handle_business_connection(make_connection(owner=999))
+        self.assertIs(out, ConnectionOutcome.IGNORED_UNAUTHORIZED)
+        self.assertIsNone(self.db.connection)
+
+    async def test_legacy_can_reply_used_only_without_rights(self):
+        await self.svc.handle_business_connection(make_connection(rights=False, legacy=True))
+        self.assertTrue(self.db.connection.can_reply)
+        await self.svc.handle_business_connection(make_connection(can_reply=False, legacy=True))
+        self.assertFalse(self.db.connection.can_reply)
+
+    async def test_stale_disabled_connection_does_not_replace_active(self):
+        out = await self.svc.handle_business_connection(make_connection(conn_id="other", enabled=False))
+        self.assertIs(out, ConnectionOutcome.IGNORED_STALE_DISABLED)
+        self.assertEqual(self.db.connection.connection_id, CONN)
+
+    async def test_same_connection_disabled_is_saved(self):
+        await self.svc.handle_business_connection(make_connection(enabled=False))
+        self.assertFalse(self.db.connection.is_enabled)
+        self.assertIs(await self.handle(), ReplyOutcome.IGNORED_CONNECTION_DISABLED)
+
+    # ---- filtering ----
+    async def test_ignored_inputs_never_send(self):
+        cases = [
+            (dict(chat_type="group"), ReplyOutcome.IGNORED_NOT_PRIVATE),
+            (dict(chat_type="channel"), ReplyOutcome.IGNORED_NOT_PRIVATE),
+            (dict(is_bot=True), ReplyOutcome.IGNORED_BOT),
+            (dict(sender_id=False), ReplyOutcome.IGNORED_NO_SENDER),
+            (dict(conn=None), ReplyOutcome.IGNORED_NO_CONNECTION_ID),
+            (dict(conn="  "), ReplyOutcome.IGNORED_NO_CONNECTION_ID),
+            (dict(chat_id=OTHER_ADMIN), ReplyOutcome.IGNORED_ADMIN_CHAT),
+            (dict(chat_id=STRANGER, sender_id=OWNER), ReplyOutcome.IGNORED_ADMIN_CHAT),
+        ]
+        for i, (kwargs, expected) in enumerate(cases):
+            with self.subTest(kwargs=kwargs):
+                self.assertIs(await self.handle(msg_id=i + 1, **kwargs), expected)
+        self.assertEqual(self.tr.sends, [])
+
+    async def test_owner_own_message_ignored(self):
+        await self.db.save_business_connection(CONN, True, True, 777)
+        self.settings.admin_ids = frozenset({777})
+        svc = AutoReplyService(self.db, self.settings, clock=self.clock)
+        out = await svc.handle_business_message(make_message(chat_id=STRANGER, sender_id=777), self.tr)
+        self.assertIn(out, (ReplyOutcome.IGNORED_ADMIN_CHAT, ReplyOutcome.IGNORED_OWNER))
+        self.assertEqual(self.tr.sends, [])
+
+    async def test_no_reply_right_ignored(self):
+        await self.db.save_business_connection(CONN, True, False, OWNER)
+        self.assertIs(await self.handle(), ReplyOutcome.IGNORED_NO_REPLY_RIGHT)
+
+    async def test_unknown_connection_verified_then_rejected_when_unauthorized(self):
+        self.tr.fetch_result = make_connection(conn_id="newconn", owner=999)
+        self.assertIs(await self.handle(conn="newconn"), ReplyOutcome.IGNORED_UNAUTHORIZED_CONNECTION)
+        self.assertIs(await self.handle(msg_id=2, conn="newconn"), ReplyOutcome.IGNORED_UNAUTHORIZED_CONNECTION)
+        self.assertEqual(self.tr.fetch_calls, 1)  # negative cache avoids repeat API calls
+        self.assertEqual(self.db.connection.connection_id, CONN)
+
+    async def test_unknown_connection_of_admin_is_adopted(self):
+        self.db.connection = None
+        self.tr.fetch_result = make_connection()
+        self.assertIs(await self.handle(), ReplyOutcome.SENT)
+        self.assertEqual(self.db.connection.connection_id, CONN)
+
+    # ---- state / sessions ----
+    async def test_off_state_never_sends_and_records_nothing(self):
+        self.db.state.enabled = False
+        self.assertIs(await self.handle(), ReplyOutcome.IGNORED_AUTOREPLY_OFF)
+        self.assertEqual((self.tr.sends, self.db.inbound, self.db.replies), ([], set(), {}))
+
+    async def test_one_reply_per_session_and_new_session_replies_again(self):
+        self.assertIs(await self.handle(msg_id=1), ReplyOutcome.SENT)
+        self.assertEqual(self.tr.sends[0], {"connection_id": CONN, "chat_id": STRANGER, "text": "در حال خواب هستم"})
+        self.assertIs(await self.handle(msg_id=2), ReplyOutcome.ALREADY_REPLIED)
+        self.db.state.session_id, self.db.state.active_status_key = "s2", "gaming"
+        self.assertIs(await self.handle(msg_id=3), ReplyOutcome.SENT)
+        self.assertEqual(self.tr.sends[1]["text"], "در حال بازی")
+        self.assertEqual(len(self.tr.sends), 2)
+
+    async def test_duplicate_update_is_deduplicated(self):
+        self.assertIs(await self.handle(msg_id=1), ReplyOutcome.SENT)
+        self.assertIs(await self.handle(msg_id=1), ReplyOutcome.DUPLICATE_EVENT)
+        self.assertEqual(len(self.tr.sends), 1)
+
+    async def test_concurrent_messages_send_exactly_once(self):
+        results = await asyncio.gather(*(self.handle(msg_id=i) for i in range(1, 8)))
+        self.assertEqual(len(self.tr.sends), 1)
+        self.assertEqual(results.count(ReplyOutcome.SENT), 1)
+
+    async def test_empty_reply_text_not_sent(self):
+        self.db.statuses["sleeping"].reply_text = "   "
+        self.assertIs(await self.handle(), ReplyOutcome.IGNORED_NO_REPLY_TEXT)
+        self.assertEqual(self.db.replies, {})
+
+    # ---- failures ----
+    async def test_network_failure_then_retry_on_next_message(self):
+        self.tr.script = [TelegramNetworkError(METHOD, "boom")]
+        self.assertIs(await self.handle(msg_id=1), ReplyOutcome.FAILED)
+        self.assertEqual(self.db.replies[(CONN, STRANGER, "s1")], {"status": "failed", "message_id": None, "error": "network_error"})
+        self.assertIs(await self.handle(msg_id=2), ReplyOutcome.SENT)
+        self.assertEqual(self.db.replies[(CONN, STRANGER, "s1")]["status"], "sent")
+        self.assertEqual(len(self.tr.sends), 1)
+
+    async def test_retry_after_sets_cooldown(self):
+        self.tr.script = [TelegramRetryAfter(METHOD, "flood", 30)]
+        self.assertIs(await self.handle(msg_id=1), ReplyOutcome.RATE_LIMITED)
+        self.assertIs(await self.handle(msg_id=2), ReplyOutcome.COOLDOWN_ACTIVE)
+        self.clock.now += 31
+        self.assertIs(await self.handle(msg_id=3), ReplyOutcome.SENT)
+
+    async def test_forbidden_records_safe_error_and_resyncs_connection(self):
+        self.tr.script = [TelegramForbiddenError(METHOD, "Forbidden: SECRET BODY TEXT")]
+        self.tr.fetch_result = make_connection(enabled=True, can_reply=False)
+        self.assertIs(await self.handle(), ReplyOutcome.FAILED)
+        self.assertEqual(self.db.replies[(CONN, STRANGER, "s1")]["error"], "telegram_forbidden")
+        self.assertFalse(self.db.connection.can_reply)
+        self.assertIs(await self.handle(msg_id=2), ReplyOutcome.IGNORED_NO_REPLY_RIGHT)
+
+    async def test_invalid_connection_disables_it_locally(self):
+        self.tr.script = [TelegramBadRequest(METHOD, "Bad Request: BUSINESS_CONNECTION_INVALID")]
+        self.tr.fetch_result = TelegramBadRequest(METHOD, "Bad Request: connection not found")
+        self.assertIs(await self.handle(), ReplyOutcome.FAILED)
+        self.assertEqual(self.db.replies[(CONN, STRANGER, "s1")]["error"], "invalid_connection")
+        self.assertFalse(self.db.connection.is_enabled)
+
+    async def test_state_change_between_claim_and_send_releases_slot(self):
+        original = self.db.claim_reply
+
+        async def claim_then_disable(*args):
+            ok = await original(*args)
+            self.db.state.enabled = False
+            return ok
+
+        self.db.claim_reply = claim_then_disable
+        self.assertIs(await self.handle(), ReplyOutcome.STATE_CHANGED)
+        self.assertEqual(self.tr.sends, [])
+        self.assertEqual(self.db.replies[(CONN, STRANGER, "s1")]["status"], "failed")
+
+    async def test_cancellation_releases_slot_and_propagates(self):
+        self.tr.block = asyncio.Event()
+        task = asyncio.create_task(self.handle())
+        await self.tr.started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(self.db.replies[(CONN, STRANGER, "s1")], {"status": "failed", "message_id": None, "error": "cancelled"})
+
+    # ---- privacy ----
+    async def test_logs_contain_no_body_or_full_connection_id(self):
+        with self.assertLogs("ziko.auto_reply", level="DEBUG") as logs:
+            self.tr.script = [TelegramForbiddenError(METHOD, "Forbidden: SECRET BODY TEXT")]
+            self.tr.fetch_result = make_connection()
+            await self.handle(msg_id=1)
+            await self.handle(msg_id=2)
+            await self.handle(msg_id=3, chat_type="group")
+        joined = "\n".join(logs.output)
+        self.assertNotIn(SECRET_BODY, joined)
+        self.assertNotIn(CONN, joined)
+        self.assertNotIn("SECRET", joined)
+
+
+class RouterTests(unittest.TestCase):
+    def test_router_registers_only_new_business_updates(self):
+        router = create_business_router(FakeDatabase(), SimpleNamespace(admin_ids=frozenset({OWNER})))
+        self.assertEqual(len(router.business_connection.handlers), 1)
+        self.assertEqual(len(router.business_message.handlers), 1)
+        self.assertEqual(len(router.edited_business_message.handlers), 0)
+        self.assertEqual(len(router.deleted_business_messages.handlers), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

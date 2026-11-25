@@ -31,10 +31,17 @@ def create_master_router(*, registry: TenantRegistry, manager: TenantBotManager,
             return
         lines = [f"ربات‌های ثبت‌شده: {len(items)}", ""]
         for item in items[:100]:
-            state = "فعال" if item.enabled else "غیرفعال"
+            enabled_state = "فعال" if item.enabled else "غیرفعال"
+            runtime_state = manager.runtime_status(item.bot_id)
             lines.append(
-                f"• @{item.username} — Bot ID: {item.bot_id} — Owner: {item.user_id} — {state}"
+                f"• @{item.username} — Bot ID: {item.bot_id} — Owner: {item.user_id} "
+                f"— {enabled_state} — Polling: {runtime_state}"
             )
+        lines.extend([
+            "",
+            f"Polling فعال: {manager.running_count()} / {manager.max_concurrent_pollers}",
+            f"در صف انتظار: {manager.waiting_count()}",
+        ])
         if len(items) > 100:
             lines.append(f"\nو {len(items) - 100} مورد دیگر...")
         await message.answer("\n".join(lines))
