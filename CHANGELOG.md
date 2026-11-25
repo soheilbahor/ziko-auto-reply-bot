@@ -1,3 +1,104 @@
+## [1.4.2] - 2026-11-25
+
+### Repository and installation
+- Set the canonical repository to `ziko-freedom/ziko-auto-reply-bot` in the central release configuration and user-facing defaults.
+- Reworked the GitHub installer to resolve the latest stable release and its actual assets through the GitHub API instead of assuming a `.tar.gz` filename.
+- Added compatibility for the uploaded `ziko-assistant-1.4.1-version-fixed.zip` naming/layout; checksum, archive validation and GitHub Artifact Attestation remain mandatory.
+- Updated Persian and English README files with the one-line latest-stable installer and clearer installation, update, backup and troubleshooting instructions.
+- Added release-asset tests for the version-fixed ZIP naming convention.
+
+
+### CI and release workflows
+- GitHub Actions moved off Node.js 20: `actions/checkout` v7.0.1 and `actions/setup-python` v7.1.0 (both `node24`), and `actions/attest-build-provenance` v4.2.2 (its inner `actions/attest` v4.2.1 is `node24`). Pins are full commit SHAs read from the official repositories with `git ls-remote`.
+
+### Uninstall
+- `scripts/uninstall.sh` always removes the program, service, CLI links, configuration and backups.
+- The database and all ZIKO data are deleted only after the operator types the exact database path shown by the script and then `DELETE DATABASE PERMANENTLY`. Any other answer, a missing terminal, or `--yes` keeps the database.
+- When the database is kept, the whole data directory is kept (databases, tenant registry and its key) with the `ziko` user that owns it. Everything else is removed.
+- The former `--purge-data` and `--remove-user` flags were removed; they allowed deletion without the database confirmation.
+
+### Release and updater
+- Release workflow builds `ziko-assistant-vX.Y.Z.tar.gz` and `.zip` plus `SHA256SUMS`, verifies them before publishing, and after publishing checks the GitHub Release API. A release with a missing, misnamed or corrupt archive fails the workflow.
+- `scripts/release_asset.py` resolves the archive from the Release API, rejects releases without assets or with unsupported names, verifies SHA-256, layout, forbidden files and the embedded VERSION, and extracts safely for both formats.
+- `scripts/update.sh` uses that helper for stable releases instead of a hard-coded file name.
+- Tests cover: no assets, wrong asset name, missing checksum file, corrupt zip and tar.gz, checksum mismatch, unknown format, embedded VERSION mismatch, unsafe paths, forbidden files and missing required files.
+
+### Replies (phase 4, storage and engine; admin panel pending)
+- Schema version 3 (migrated from 2, with a faithful v1 migration test): ordered reply steps (text, emoji, sticker by file_id), owner settings (timezone, language, owner name), reply exceptions, status soft delete, reply mode, minimum interval, local hour window, and a `partial` delivery state with `parts_sent`.
+- Replies quote the incoming message by default (`reply_parameters`); `plain` mode sends without quoting.
+- A status can send several parts in order. A part that fails after earlier parts were delivered makes the reply `partial`: final, never resent.
+- Placeholders `{name}`, `{time}`, `{date}` and `{owner}`; the contact's name is used only for that reply and never stored.
+- Policy gates run before a reservation: inactive status, exception contact, outside the hour window, minimum interval.
+
+### Logging
+- Structured logs with a correlation ID per Telegram update, a bot scope and the stage that failed (`docs/LOGGING.md`).
+- Separate `master.log` and `tenants/bot-<id>.log` files. A child bot's records never reach another child's file or the master file.
+- Redaction of bot tokens, `password`/`secret`/`token`/`api_key` values, PEM and Fernet keys and bearer tokens, in messages, arguments and tracebacks.
+- Identical repeated WARNING/ERROR lines are collapsed within a window, with a count.
+- Size-based rotation with bounded history for every file.
+- `/logs` for child owners (own bot) and platform admins (`/logs` and `/logs <BOT_ID>`).
+- CRITICAL records are sent to platform admins, rate limited.
+- `ziko logs --master`, `--bot <BOT_ID>` and `--level` for the log files.
+- `update.sh` now starts with an `UPDATE_START` stage.
+
+### Fixed
+- Platform backup: the encrypted platform archive now contains the plain, integrity-checked SQLite snapshot. Previously it stored the age-encrypted file, so `restore-platform.sh` always refused to restore it.
+- Updater: the plaintext pre-update database snapshot is removed on every exit path, including failures.
+- Owner `/health` and statistics: the statistics screen now uses the keys that `get_statistics()` returns (it previously always showed "not available").
+- User-visible messages (`/health`, token-revoked admin notice, CLI access denial, installer errors) no longer show a literal `\n`.
+- Child-bot supervisor: the restart backoff resets after a poller stays up for 60 seconds, instead of staying at its maximum forever.
+- Managed bot credential updates: if the update is refused or fails, the previous poller is restarted instead of leaving the bot stopped.
+- Managed bot creation by platform admins honours the multi-bot allowance, as the token-connect path already did.
+- Updater reads CRLF-terminated `release.conf` correctly.
+- Updater: stage-by-stage logging, dry-run of migrations on copies before any live change, verified backup (archive and DB snapshot), installed-tree verification, and a post-update health check (integrity, schema version, token decryption, optional getMe). Failures roll back, including the service restart.
+- Platform backups include a manifest with SHA-256 for every file; restore refuses archives that do not match it.
+- New `scripts/verify_platform.py` (manifest and health checks) and `scripts/migrate_check.py` (migration dry-run).
+
+### Quality
+- Resolved the five non-blocking Ruff findings.
+- Added `tests/test_phase1_regressions.py`, including an end-to-end platform backup and restore test with real `age` and `sqlite3`.
+- Added `tests/test_platform_manifest.py` (tampered, unlisted and missing-manifest detection).
+- Added `docs/UPDATE_AND_BACKUP.md`: update stages, rollback, backup, restore and health checks.
+
+### Known open items (not in 1.4.1)
+- Full systemd, Telegram and Business behaviour still needs a live run on the server (see docs/reports/1.4.1-phase1-fixes.md).
+- GitHub Actions `actions/checkout` and `actions/setup-python` are still SHA-pinned to versions that run on Node.js 20. Replace them with SHAs of Node.js 24 releases, verified with `gh api`, then run CI.
+
+## [1.4.0] - 2026-11-25
+
+### Bot engine improvements
+- Added privacy-preserving per-bot delivery statistics (sent, failed, uncertain, pending, inbound events, active Business connections).
+- Added owner-only `/health` command to each tenant bot to diagnose Business connection rights and auto-reply state.
+- Hardened inbound Business message validation against incomplete update objects.
+- Kept each tenant's database, FSM, owner allow-list and Business connection isolated.
+
+### Existing behavior retained
+- Telegram Business connection updates are persisted per tenant bot.
+- Replies are sent only when the connection is enabled and `can_reply` is explicitly granted.
+- Private incoming customer messages are deduplicated and use the selected status reply.
+- At-most-once delivery protection remains in place to avoid duplicate replies after ambiguous network failures.
+
+### Validation
+- Static compilation and shell syntax checks are required for this archive.
+- Telegram Business linking and live multi-tenant behavior must be verified on a real Telegram Business account before production rollout.
+
+## [1.3.0] - 2026-11-25
+
+### Fixed
+- Added an explicit tenant-supervisor shutdown state so child pollers cannot restart while the service is stopping.
+- Disabled signal-handler installation in child dispatchers; the master dispatcher remains the process signal owner.
+- Added bounded graceful cancellation and cleanup for child pollers.
+- Added a credential-rotation path that stops the old poller before replacing a managed-bot token, avoiding an Unauthorized/disable race.
+- Stale Telegram callback queries are now treated as expired UI interactions instead of handler failures.
+
+### Improved
+- Prune old inbound update identifiers at startup (30 days by default; configurable with `ZIKO_EVENT_RETENTION_DAYS`, 1..365).
+- Set an explicit systemd stop timeout aligned with child-poller cleanup.
+- Added lifecycle and operational notes for the 1.3.0 release.
+
+### Validation
+- Static compilation and shell syntax checks are performed for this archive; live Telegram and systemd behavior still require server-side verification.
+
 # Changelog
 
 ## [1.2.2] - 2026-11-25

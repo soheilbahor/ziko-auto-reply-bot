@@ -8,7 +8,7 @@ The root `VERSION` file is the only manually maintained application version. Do 
 
 1. Update only the root `VERSION` file and add the matching `CHANGELOG.md` entry.
 2. Push the changes to `main` and wait for CI to pass.
-3. Create and push the matching tag, for example `git tag -a v1.2.2 -m "ZIKO v1.2.2" && git push origin v1.2.2`.
+3. Create and push the matching tag, for example `git tag -a vX.Y.Z -m "ZIKO vX.Y.Z" && git push origin vX.Y.Z`, where X.Y.Z equals the root `VERSION` file.
 4. The release workflow verifies that the tag matches `VERSION`, preserves the same marker in the archive, and publishes the assets.
 5. Never reuse or move a published tag. If a release tag is wrong, publish a new patch version with a new tag.
 
@@ -18,7 +18,7 @@ The first upgrade from the older 1.0.6 updater should have a full-platform backu
 
 ```bash
 sudo curl -fsSL \
-  https://raw.githubusercontent.com/soheilbahor/ziko-auto-reply-bot/main/scripts/backup.sh \
+  https://raw.githubusercontent.com/ziko-freedom/ziko-auto-reply-bot/main/scripts/backup.sh \
   -o /tmp/ziko-platform-backup.sh
 sudo bash /tmp/ziko-platform-backup.sh
 ```

@@ -54,7 +54,7 @@ PY
 chmod 600 "$TMP"
 age -r "$ZIKO_AGE_RECIPIENT" -o "$OUT" "$TMP"
 chmod 600 "$OUT"
-rm -f -- "$TMP"
+# $TMP (plain SQLite, already integrity-checked) is kept until the platform archive has copied it.
 (cd "$DEST" && sha256sum "$BASE" > "$SUMTMP")
 chmod 600 "$SUMTMP"
 mv -- "$SUMTMP" "$OUT.sha256"
@@ -81,8 +81,19 @@ platform_cleanup() {
   [[ "$PLATFORM_PUBLISHED" -eq 1 ]] || rm -f -- "$PLATFORM_ARCHIVE" "$PLATFORM_ARCHIVE.sha256"
 }
 trap 'cleanup; platform_cleanup' EXIT
-cp -- "$OUT" "$PLATFORM_TMP/main.sqlite3"
+# The platform archive must contain the plain SQLite snapshot, not the age-encrypted file.
+cp -- "$TMP" "$PLATFORM_TMP/main.sqlite3"
 chmod 600 "$PLATFORM_TMP/main.sqlite3"
+rm -f -- "$TMP"
+"$PY" - "$PLATFORM_TMP/main.sqlite3" <<'PYCODE'
+import sqlite3, sys
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+try:
+    if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        raise SystemExit("main snapshot integrity check failed")
+finally:
+    db.close()
+PYCODE
 backup_sqlite() {
   local source="$1" target="$2"
   "$PY" - "$source" "$target" <<'PYCODE'
@@ -123,6 +134,44 @@ if [[ -f "$PLATFORM_TMP/registry.sqlite3" && ! -f "$PLATFORM_TMP/tenant-token.ke
 fi
 : "${ZIKO_AGE_RECIPIENT:?Set ZIKO_AGE_RECIPIENT to an age public recipient before creating platform backups.}"
 command -v age >/dev/null 2>&1 || die "age is required for encrypted platform backups (install the age package)."
+# Manifest: every file's SHA-256 and size, plus the schema version of each SQLite file.
+# Restore and the updater refuse an archive whose contents do not match this manifest.
+BACKUP_ID="${STAMP}-$$"
+APP_VERSION="unknown"
+[[ -f "$APP_DIR/VERSION" ]] && APP_VERSION="$(tr -d '[:space:]' < "$APP_DIR/VERSION")"
+"$PY" - "$PLATFORM_TMP" "$BACKUP_ID" "$APP_VERSION" <<'PYCODE'
+import hashlib, json, sqlite3, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1])
+files, schema = {}, {}
+for path in sorted(root.rglob("*")):
+    if not path.is_file():
+        continue
+    rel = path.relative_to(root).as_posix()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    files[rel] = {"sha256": digest.hexdigest(), "bytes": path.stat().st_size}
+    if rel.endswith(".sqlite3"):
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            schema[rel] = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            conn.close()
+manifest = {
+    "format": "ziko-platform-backup/1",
+    "backup_id": sys.argv[2],
+    "created_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "ziko_version": sys.argv[3],
+    "schema_versions": schema,
+    "files": files,
+}
+(root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PYCODE
+chmod 600 "$PLATFORM_TMP/manifest.json"
 tar -czf "$PLATFORM_PLAINTEXT" -C "$PLATFORM_TMP" .
 chmod 600 "$PLATFORM_PLAINTEXT"
 age -r "$ZIKO_AGE_RECIPIENT" -o "$PLATFORM_ENCRYPTED_TMP" "$PLATFORM_PLAINTEXT"

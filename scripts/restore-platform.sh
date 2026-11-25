@@ -2,6 +2,7 @@
 # Restore a complete ZIKO platform archive (main + child-bot registry/key/databases).
 set -Eeuo pipefail
 umask 077
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${ZIKO_APP_DIR:-/opt/ziko-assistant}"
 ENV_FILE="${ZIKO_ENV_FILE:-/etc/ziko-assistant/ziko.env}"
 BACKUP_DIR="${ZIKO_BACKUP_DIR:-/var/backups/ziko-assistant}"
@@ -87,7 +88,7 @@ fi
 import os, re, shutil, sys, tarfile
 from pathlib import Path
 archive, destination = sys.argv[1], Path(sys.argv[2])
-allowed = re.compile(r"^(?:main\.sqlite3|registry\.sqlite3|tenant-token\.key|tenants/(?:bot-)?[0-9]+\.sqlite3)$")
+allowed = re.compile(r"^(?:main\.sqlite3|registry\.sqlite3|tenant-token\.key|manifest\.json|tenants/(?:bot-)?[0-9]+\.sqlite3)$")
 total = 0
 with tarfile.open(archive, "r:gz") as tf:
     for member in tf.getmembers():
@@ -108,7 +109,10 @@ with tarfile.open(archive, "r:gz") as tf:
         with source, target.open("xb") as output: shutil.copyfileobj(source, output)
         os.chmod(target, 0o600)
 if not (destination / "main.sqlite3").is_file(): raise SystemExit("Platform archive does not contain main.sqlite3")
+if not (destination / "manifest.json").is_file(): raise SystemExit("Platform archive has no manifest.json; refusing an unverifiable backup")
 PYCODE
+# Every extracted file must match the SHA-256 recorded when the archive was created.
+"$PY" "$SCRIPT_DIR/verify_platform.py" manifest "$STAGE" || die "Platform archive failed manifest verification; nothing was changed."
 "$PY" - "$STAGE" <<'PYCODE'
 import sqlite3, sys
 from pathlib import Path

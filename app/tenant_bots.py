@@ -5,6 +5,7 @@ import asyncio
 import io
 import logging
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,18 +17,25 @@ from aiogram.types import BotCommand, BufferedInputFile, InputProfilePhotoStatic
 
 from app.handlers.admin import create_admin_router
 from app.handlers.business import create_business_router
+from app.logging_setup import CorrelationMiddleware, correlation_scope, log_file_for_bot
 from app.storage import Database
 from app.tenant_registry import Tenant, TenantRegistry
 
 logger = logging.getLogger("ziko.tenant_bots")
 
+# A poller that stayed up at least this long is considered healthy: its restart backoff resets.
+STABLE_RUN_SECONDS = 60.0
+INITIAL_RESTART_DELAY = 2
+MAX_RESTART_DELAY = 60
+
 
 class TenantBotManager:
     def __init__(
         self, *, settings: Any, registry: TenantRegistry, master_bot: Bot,
-        max_concurrent_pollers: int | None = None,
+        max_concurrent_pollers: int | None = None, log_dir: Path | None = None,
     ) -> None:
         self.settings = settings
+        self.log_dir = log_dir if log_dir is not None else settings.database_path.parent / "logs"
         self.registry = registry
         self.master_bot = master_bot
         configured_limit = (
@@ -47,6 +55,8 @@ class TenantBotManager:
         self._photo_loaded = False
         self._photo_bytes: bytes | None = None
         self._photo_synced: set[int] = set()
+        self._closing = False
+        self._lifecycle_lock = asyncio.Lock()
 
     @property
     def tenant_db_dir(self) -> Path:
@@ -58,76 +68,104 @@ class TenantBotManager:
                 await self.start_tenant(tenant)
 
     async def start_tenant(self, tenant: Tenant) -> None:
-        if not tenant.enabled:
+        async with self._lifecycle_lock:
+            if self._closing or not tenant.enabled:
+                return
+            current = self._tasks.get(tenant.bot_id)
+            if current is not None and not current.done():
+                return
+            task = asyncio.create_task(
+                self._supervise_tenant(tenant), name=f"ziko-tenant-{tenant.bot_id}"
+            )
+            self._tasks[tenant.bot_id] = task
+
+    async def restart_tenant(self, bot_id: int) -> None:
+        """Stop the old credential/session before starting the latest registry record."""
+        await self.stop_tenant(bot_id)
+        if self._closing:
             return
-        current = self._tasks.get(tenant.bot_id)
-        if current is not None and not current.done():
-            return
-        task = asyncio.create_task(
-            self._supervise_tenant(tenant), name=f"ziko-tenant-{tenant.bot_id}"
-        )
-        self._tasks[tenant.bot_id] = task
+        tenant = await self.registry.get_tenant_by_bot_id(bot_id, reveal_token=True)
+        if tenant is not None and tenant.enabled:
+            await self.start_tenant(tenant)
 
     async def stop_tenant(self, bot_id: int) -> None:
-        task = self._tasks.pop(bot_id, None)
+        async with self._lifecycle_lock:
+            task = self._tasks.pop(bot_id, None)
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        self._running.discard(bot_id)
+        self._waiting.discard(bot_id)
 
     async def _supervise_tenant(self, tenant: Tenant) -> None:
-        delay = 2
+        delay = INITIAL_RESTART_DELAY
         bot_id = tenant.bot_id
-        while True:
+        scope = {"bot_id": bot_id}
+        failures = 0  # consecutive runs that did not reach STABLE_RUN_SECONDS
+        while not self._closing:
+            attempt_started = time.monotonic()
             self._waiting.add(bot_id)
             logger.info(
-                "Child bot waiting for polling slot user_id=%s bot_id=%s active=%s waiting=%s limit=%s",
-                tenant.user_id, bot_id, len(self._running), len(self._waiting),
-                self.max_concurrent_pollers,
+                "Child bot waiting for polling slot user_id=%s active=%s waiting=%s limit=%s",
+                tenant.user_id, len(self._running), len(self._waiting),
+                self.max_concurrent_pollers, extra=scope,
             )
             try:
                 async with self._poller_slots:
                     self._waiting.discard(bot_id)
                     self._running.add(bot_id)
                     logger.info(
-                        "Child bot acquired polling slot user_id=%s bot_id=%s active=%s waiting=%s",
-                        tenant.user_id, bot_id, len(self._running), len(self._waiting),
+                        "Child bot acquired polling slot user_id=%s active=%s waiting=%s",
+                        tenant.user_id, len(self._running), len(self._waiting), extra=scope,
                     )
                     try:
                         await self._run_tenant_once(tenant)
                     finally:
                         self._running.discard(bot_id)
+                failures += 1
                 logger.warning(
-                    "Child bot polling ended user_id=%s bot_id=%s; restarting",
-                    tenant.user_id, bot_id,
+                    "Child bot polling ended user_id=%s retry=%s; restarting",
+                    tenant.user_id, failures, extra=scope,
                 )
             except asyncio.CancelledError:
                 raise
             except TelegramUnauthorizedError:
                 await self.registry.set_tenant_enabled(bot_id, False)
                 logger.error(
-                    "Child bot token was rejected; tenant disabled user_id=%s bot_id=%s",
-                    tenant.user_id, bot_id,
+                    "Child bot token was rejected; tenant disabled user_id=%s",
+                    tenant.user_id, extra={**scope, "stage": "POLLING"},
                 )
                 await self._notify_admins_token_revoked(tenant)
                 return
             except Exception as exc:
+                # The error type only: exception text may contain Telegram URLs with the token.
+                failures += 1
                 logger.error(
-                    "Child bot polling failed user_id=%s bot_id=%s error=%s",
-                    tenant.user_id, bot_id, type(exc).__name__,
+                    "Child bot polling failed user_id=%s error=%s retry=%s",
+                    tenant.user_id, type(exc).__name__, failures,
+                    extra={**scope, "stage": "POLLING"},
                 )
             finally:
                 self._waiting.discard(bot_id)
                 self._running.discard(bot_id)
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 60)
+            if time.monotonic() - attempt_started >= STABLE_RUN_SECONDS:
+                delay = INITIAL_RESTART_DELAY
+                failures = 0
+            if self._closing:
+                break
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            delay = min(delay * 2, MAX_RESTART_DELAY)
 
     async def _notify_admins_token_revoked(self, tenant: Tenant) -> None:
         """Notify platform administrators without exposing the revoked token."""
         text = (
-            "⚠️ ربات زیرمجموعه به دلیل رد شدن توکن توسط تلگرام غیرفعال شد.\\n"
-            f"ربات: @{tenant.username}\\n"
-            f"Bot ID: {tenant.bot_id}\\n"
-            f"مالک: {tenant.user_id}\\n"
+            "⚠️ ربات زیرمجموعه به دلیل رد شدن توکن توسط تلگرام غیرفعال شد.\n"
+            f"ربات: @{tenant.username}\n"
+            f"Bot ID: {tenant.bot_id}\n"
+            f"مالک: {tenant.user_id}\n"
             "برای فعال‌سازی مجدد، مالک باید توکن معتبر را دوباره متصل کند."
         )
         for admin_id in sorted(getattr(self.settings, "admin_ids", ())):
@@ -193,6 +231,12 @@ class TenantBotManager:
             )
 
     async def _run_tenant_once(self, tenant: Tenant) -> None:
+        # Records logged while this child polls go to its own file. Tasks created
+        # below inherit this scope, so aiogram's records are routed correctly too.
+        with correlation_scope(bot_id=tenant.bot_id):
+            await self._run_tenant_polling(tenant)
+
+    async def _run_tenant_polling(self, tenant: Tenant) -> None:
         bot = Bot(token=tenant.bot_token)
         self.tenant_db_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.tenant_db_dir, 0o700)
@@ -214,6 +258,7 @@ class TenantBotManager:
             business_owner_id=tenant.user_id,
         )
         dp = Dispatcher(storage=MemoryStorage())
+        dp.update.outer_middleware(CorrelationMiddleware(tenant=True))
         try:
             await db.initialize()
             await bot.set_my_commands([
@@ -222,13 +267,17 @@ class TenantBotManager:
                 BotCommand(command="cancel", description="لغو عملیات"),
             ])
             await self._sync_profile_photo(bot, tenant)
-            dp.include_router(create_admin_router(db, tenant_settings))
+            dp.include_router(create_admin_router(
+                db, tenant_settings, log_path=log_file_for_bot(self.log_dir, tenant.bot_id),
+            ))
             dp.include_router(create_business_router(db, tenant_settings))
+
             logger.info("Child bot polling started user_id=%s bot_id=%s", tenant.user_id, tenant.bot_id)
             await dp.start_polling(
                 bot,
                 allowed_updates=["message", "callback_query", "business_connection", "business_message"],
                 close_bot_session=False,
+                handle_signals=False,
             )
         except asyncio.CancelledError:
             raise
@@ -240,12 +289,23 @@ class TenantBotManager:
             await db.close()
 
     async def close(self) -> None:
-        tasks = list(self._tasks.values())
+        # Set this before cancelling: no supervisor may enter its restart path
+        # while systemd is stopping the master process.
+        async with self._lifecycle_lock:
+            self._closing = True
+            tasks = list(self._tasks.values())
+            self._tasks.clear()
         for task in tasks:
             task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._tasks.clear()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=20
+                )
+            except asyncio.TimeoutError:
+                logger.error("Timed out while stopping child bot pollers")
+        self._running.clear()
+        self._waiting.clear()
 
     def running_count(self) -> int:
         """Number of child bots that currently hold a polling slot."""

@@ -1,11 +1,15 @@
 """Master-owner commands for platform-wide tenant visibility."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from aiogram import Router
-from aiogram.enums import ChatType
+from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import BaseFilter, Command
 from aiogram.types import Message
 
+from app.handlers.admin import format_problem_report
+from app.logging_setup import log_file_for_bot, master_log_file, recent_problems
 from app.tenant_registry import TenantRegistry
 from app.tenant_bots import TenantBotManager
 
@@ -19,7 +23,10 @@ class MasterAdminFilter(BaseFilter):
                     and message.chat.type == ChatType.PRIVATE)
 
 
-def create_master_router(*, registry: TenantRegistry, manager: TenantBotManager, admin_ids: frozenset[int]) -> Router:
+def create_master_router(
+    *, registry: TenantRegistry, manager: TenantBotManager, admin_ids: frozenset[int],
+    log_dir: Path | None = None,
+) -> Router:
     router = Router(name="master_platform")
     router.message.filter(MasterAdminFilter(admin_ids))
 
@@ -45,6 +52,27 @@ def create_master_router(*, registry: TenantRegistry, manager: TenantBotManager,
         if len(items) > 100:
             lines.append(f"\nو {len(items) - 100} مورد دیگر...")
         await message.answer("\n".join(lines))
+
+    @router.message(Command("logs"))
+    async def logs(message: Message) -> None:
+        """/logs shows platform problems; /logs BOT_ID shows one child bot's problems."""
+        if log_dir is None:
+            await message.answer("گزارش لاگ در دسترس نیست.")
+            return
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) == 1:
+            path = master_log_file(log_dir)
+            title = "🧾 <b>خطاهای اخیر مستر</b>"
+        else:
+            arg = parts[1].strip()
+            if not (arg.isascii() and arg.isdigit()):
+                await message.answer("استفاده: /logs یا /logs BOT_ID")
+                return
+            path = log_file_for_bot(log_dir, int(arg))
+            title = f"🧾 <b>خطاهای اخیر ربات {arg}</b>"
+        await message.answer(
+            format_problem_report(recent_problems(path), title), parse_mode=ParseMode.HTML,
+        )
 
     @router.message(Command("tenant_disable"))
     async def tenant_disable(message: Message) -> None:

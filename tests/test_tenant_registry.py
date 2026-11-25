@@ -113,7 +113,8 @@ async def test_registry_migrates_original_user_primary_key_schema(tmp_path):
         "INSERT INTO tenants(user_id,bot_id,username,encrypted_token,enabled,created_at) "
         "VALUES(1001,2001,'legacy_bot','encrypted-placeholder',1,'2026-01-01T00:00:00Z')"
     )
-    connection.commit(); connection.close()
+    connection.commit()
+    connection.close()
     registry = TenantRegistry(path)
     await registry.initialize()
     try:
@@ -130,7 +131,6 @@ async def test_registry_migrates_original_user_primary_key_schema(tmp_path):
 
 @pytest.mark.asyncio
 async def test_managed_bot_token_update_is_encrypted_and_owner_bound(tmp_path):
-    from app.tenant_registry import BotAlreadyRegistered
 
     registry = TenantRegistry(tmp_path / "tenants.sqlite3")
     await registry.initialize()

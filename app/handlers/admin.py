@@ -14,6 +14,7 @@ import asyncio
 import html
 import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aiogram import F, Router
@@ -24,6 +25,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
+from app.handlers.admin_panel import PanelDeps, register_panel_handlers
+from app.logging_setup import recent_problems
 from app.keyboards.admin import (
     Action,
     AdminCB,
@@ -44,12 +47,14 @@ MAX_REPLY_LENGTH = 4096  # Telegram sendMessage text limit
 PREVIEW_LIMIT = 800  # keeps escaped previews safely under the 4096 message limit
 CARD_PREVIEW_LIMIT = 300
 
-# Optional statistics: only these keys of `db.get_statistics()` are rendered.
+# Statistics shown to the owner: keys must match `Database.get_statistics()`.
 _STAT_LABELS: dict[str, str] = {
-    "total_inbound": "پیام‌های دریافتی پردازش‌شده",
-    "replies_sent": "پاسخ‌های ارسال‌شده",
-    "replies_failed": "ارسال‌های ناموفق",
-    "current_session_replies": "پاسخ‌های نشست فعلی",
+    "inbound_events": "پیام‌های دریافتی پردازش‌شده",
+    "sent": "پاسخ‌های ارسال‌شده",
+    "failed": "ارسال‌های ناموفق (قابل تلاش مجدد)",
+    "uncertain": "ارسال‌های نامشخص (تلاش مجدد نمی‌شود)",
+    "pending": "در حال ارسال",
+    "active_connections": "اتصال‌های فعال Business",
 }
 
 
@@ -95,10 +100,43 @@ def _esc(value: object) -> str:
     return html.escape(str(value), quote=False)
 
 
+LOG_REPORT_CHARS = 2500  # budget for the escaped <pre> block, well under the 4096 limit
+
+
+def format_problem_report(lines: list[str], title: str) -> str:
+    """Render recent WARNING/ERROR/CRITICAL lines for an administrator (newest last)."""
+    if not lines:
+        return f"{title}\n\nهیچ خطا یا هشداری ثبت نشده است."
+    kept: list[str] = []
+    size = 0
+    for line in reversed(lines):
+        entry = _truncate(line, 300)[0]
+        if size + len(entry) + 1 > LOG_REPORT_CHARS:
+            break
+        kept.append(entry)
+        size += len(entry) + 1
+    kept.reverse()
+    return f"{title}\n\n<pre>{_esc(chr(10).join(kept))}</pre>"
+
+
 def _truncate(text: str, limit: int) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
     return text[:limit].rstrip() + "…", True
+
+
+async def _safe_callback_answer(
+    callback: CallbackQuery, text: str | None = None, **kwargs: Any
+) -> None:
+    """Answer callback queries without letting expired Telegram queries crash handlers."""
+    try:
+        await callback.answer(text, **kwargs)
+    except TelegramBadRequest as exc:
+        message = str(exc).lower()
+        if "query is too old" in message or "query id is invalid" in message:
+            logger.info("Ignored expired callback query")
+            return
+        raise
 
 
 def _utf16_length(text: str) -> int:
@@ -148,7 +186,9 @@ def render_main_card(state: AppState, statuses: list[Status]) -> str:
 # --------------------------------------------------------------------------- #
 # Router factory
 # --------------------------------------------------------------------------- #
-def create_admin_router(db: Database, settings: Settings) -> Router:
+def create_admin_router(
+    db: Database, settings: Settings, *, log_path: Path | None = None,
+) -> Router:
     """Build the admin router. Requires an FSM storage on the Dispatcher."""
     router = Router(name="admin")
     admin_filter = AdminFilter(settings.admin_ids)
@@ -190,6 +230,40 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
         logger.info("Admin action user_id=%s action=%s key=%s", user_id, action, key)
 
     # ------------------------------- commands ------------------------------ #
+    @router.message(Command("health"))
+    async def cmd_health(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        app_state = await db.get_app_state()
+        connection = await db.get_business_connection()
+        if connection is None:
+            connection_line = "اتصال Business: ثبت نشده"
+        else:
+            connection_line = (
+                f"اتصال Business: {'فعال' if connection.is_enabled else 'غیرفعال'}\n"
+                f"مجوز پاسخ‌دادن: {'دارد' if connection.can_reply else 'ندارد'}"
+            )
+        await message.answer(
+            "🩺 <b>سلامت ربات</b>\n\n"
+            f"پاسخ خودکار: {'🟢 روشن' if app_state.enabled else '🔴 خاموش'}\n"
+            f"{_esc(connection_line)}\n"
+            f"وضعیت پاسخ: {_esc(app_state.active_status_key or 'انتخاب نشده')}\n\n"
+            "برای مدیریت پاسخ‌ها /menu را بزنید.",
+            parse_mode=ParseMode.HTML,
+        )
+
+    @router.message(Command("logs"))
+    async def cmd_logs(message: Message, state: FSMContext) -> None:
+        """Recent problems of this bot only. ``log_path`` is this bot's own log file."""
+        await state.clear()
+        if log_path is None:
+            await message.answer("گزارش خطا برای این ربات در دسترس نیست.")
+            return
+        lines = recent_problems(log_path)
+        await message.answer(
+            format_problem_report(lines, "🧾 <b>خطاهای اخیر این ربات</b>"),
+            parse_mode=ParseMode.HTML,
+        )
+
     @router.message(Command("start", "menu"))
     async def cmd_start(message: Message, state: FSMContext) -> None:
         await state.clear()
@@ -207,7 +281,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
     ) -> None:
         await state.clear()
         await show_menu_in_callback(callback)
-        await callback.answer("عملیات لغو شد." if callback_data.action == Action.CANCEL else None)
+        await _safe_callback_answer(callback, "عملیات لغو شد." if callback_data.action == Action.CANCEL else None)
 
     # ----------------------------- status select --------------------------- #
     @router.callback_query(AdminCB.filter(F.action == Action.STATUS))
@@ -218,7 +292,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
         async with transition_lock:
             status = await db.get_status(callback_data.key)
             if status is None:
-                await callback.answer("وضعیت نامعتبر است.", show_alert=True)
+                await _safe_callback_answer(callback, "وضعیت نامعتبر است.", show_alert=True)
                 return
 
             current = await db.get_app_state()
@@ -235,7 +309,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
                 log_action(callback.from_user.id, "activate_status", status.key)
 
         await show_menu_in_callback(callback)
-        await callback.answer(toast)
+        await _safe_callback_answer(callback, toast)
 
     # ---------------------------- enable / disable ------------------------- #
     @router.callback_query(AdminCB.filter(F.action == Action.ENABLE))
@@ -244,7 +318,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
         async with transition_lock:
             current = await db.get_app_state()
             if current.active_status_key is None:
-                await callback.answer(
+                await _safe_callback_answer(callback, 
                     "ابتدا یکی از وضعیت‌ها را انتخاب کنید.", show_alert=True
                 )
                 return
@@ -255,7 +329,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
                 toast = "پاسخ خودکار فعال شد؛ نشست جدید آغاز شد."
                 log_action(callback.from_user.id, "enable")
         await show_menu_in_callback(callback)
-        await callback.answer(toast)
+        await _safe_callback_answer(callback, toast)
 
     @router.callback_query(AdminCB.filter(F.action == Action.DISABLE))
     async def cb_disable(callback: CallbackQuery, state: FSMContext) -> None:
@@ -264,7 +338,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
             await db.disable_auto_reply()
             log_action(callback.from_user.id, "disable")
         await show_menu_in_callback(callback)
-        await callback.answer("پاسخ خودکار غیرفعال شد.")
+        await _safe_callback_answer(callback, "پاسخ خودکار غیرفعال شد.")
 
     # ------------------------------ text editing --------------------------- #
     @router.callback_query(AdminCB.filter(F.action == Action.EDIT_MENU))
@@ -276,7 +350,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
             "✏️ <b>ویرایش متن پاسخ</b>\n\nمتن کدام وضعیت را می‌خواهید تغییر دهید؟",
             edit_status_keyboard(statuses),
         )
-        await callback.answer()
+        await _safe_callback_answer(callback)
 
     @router.callback_query(AdminCB.filter(F.action == Action.EDIT))
     async def cb_edit_pick(
@@ -285,7 +359,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
         status = await db.get_status(callback_data.key)
         if status is None:
             await state.clear()
-            await callback.answer("وضعیت نامعتبر است.", show_alert=True)
+            await _safe_callback_answer(callback, "وضعیت نامعتبر است.", show_alert=True)
             return
 
         await state.clear()
@@ -302,7 +376,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
             "برای انصراف /cancel را بزنید.",
             cancel_edit_keyboard(),
         )
-        await callback.answer()
+        await _safe_callback_answer(callback)
 
     @router.message(EditReply.waiting_text)
     async def msg_new_text(message: Message, state: FSMContext) -> None:
@@ -362,7 +436,7 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
             text = "\n".join(lines)
 
         await edit_callback_message(callback, text, back_keyboard())
-        await callback.answer()
+        await _safe_callback_answer(callback)
 
     @router.callback_query(AdminCB.filter(F.action == Action.STATS))
     async def cb_stats(callback: CallbackQuery, state: FSMContext) -> None:
@@ -382,14 +456,26 @@ def create_admin_router(db: Database, settings: Settings) -> Router:
             except Exception:
                 logger.exception("Failed to load statistics")
         await edit_callback_message(callback, text, back_keyboard())
-        await callback.answer()
+        await _safe_callback_answer(callback)
+
+    # ------------------------------- phase 4 panel ------------------------- #
+    # Must come before the catch-all below, otherwise its buttons show "expired".
+    register_panel_handlers(
+        router,
+        PanelDeps(
+            db=db,
+            edit=edit_callback_message,
+            answer=_safe_callback_answer,
+            log_action=log_action,
+        ),
+    )
 
     # ------------------------------- fallbacks ----------------------------- #
     # Registered last so specific handlers (including FSM ones) win.
     @router.callback_query(AdminCB.filter())
     async def cb_stale(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
-        await callback.answer("این دکمه منقضی شده است.", show_alert=True)
+        await _safe_callback_answer(callback, "این دکمه منقضی شده است.", show_alert=True)
         await show_menu_in_callback(callback)
 
     @router.message(StateFilter(None))

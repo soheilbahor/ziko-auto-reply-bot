@@ -156,7 +156,8 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         try:
             probe = Bot(token=token)
             me = await probe.get_me()
-        except Exception:
+        except Exception as exc:
+            logger.warning("Token probe rejected by Telegram error=%s", type(exc).__name__)
             await message.answer("تلگرام توکن را تأیید نکرد. توکن BotFather را بررسی و دوباره ارسال کنید.")
             return
         finally:
@@ -171,10 +172,12 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
                 token=token, allow_multiple=user_id in admin_ids,
             )
         except UserAlreadyHasBot:
+            logger.warning("Tenant registration refused reason=UserAlreadyHasBot")
             await message.answer("شما قبلاً یک ربات ثبت کرده‌اید؛ هر کاربر فقط یک ربات می‌تواند داشته باشد.")
             await state.clear()
             return
         except TenantLimitReached:
+            logger.warning("Tenant registration refused reason=TenantLimitReached")
             await message.answer(
                 "ظرفیت ثبت ربات در حال حاضر تکمیل است یا محدودیت ثبت‌نام ساعتی شما به پایان رسیده است. "
                 "کمی بعد دوباره تلاش کنید."
@@ -182,6 +185,7 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
             await state.clear()
             return
         except BotAlreadyRegistered:
+            logger.warning("Tenant registration refused reason=BotAlreadyRegistered")
             await message.answer("این ربات قبلاً توسط یک حساب دیگر ثبت شده است.")
             return
         await state.clear()
@@ -200,6 +204,15 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
     @router.message(BotSetup.waiting_for_token)
     async def invalid_token_message(message: Message) -> None:
         await message.answer("لطفاً توکن را به‌صورت متن ارسال کنید؛ برای انصراف /cancel را بفرستید.")
+
+    async def _restart_previous_poller(bot_id: int) -> None:
+        """After a failed credential update, put the still-valid previous poller back.
+
+        Without this, a refused update leaves an enabled bot stopped until a manual fix.
+        """
+        previous = await registry.get_tenant_by_bot_id(bot_id, reveal_token=True)
+        if previous is not None and previous.enabled:
+            await manager.start_tenant(previous)
 
     # ``update`` is a root-Dispatcher observer in aiogram; child Routers do not expose it.
     @dispatcher.update(F.managed_bot)
@@ -244,17 +257,21 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
                 if existing_bot.user_id != owner_id:
                     logger.warning("Managed bot owner mismatch bot_id=%s", child.id)
                     return
+                # Stop the old token first. Otherwise its pending Unauthorized
+                # response can race with the credential update and disable the new token.
+                await manager.stop_tenant(child.id)
                 tenant = await registry.update_tenant_credentials(
                     user_id=owner_id, bot_id=child.id,
                     username=child.username or str(child.id), token=token,
                 )
                 if tenant is None:
+                    await _restart_previous_poller(child.id)
                     return
-                await manager.stop_tenant(child.id)
             else:
                 tenant = await registry.add_tenant(
                     user_id=owner_id, bot_id=child.id,
                     username=child.username or str(child.id), token=token,
+                    allow_multiple=owner_id in admin_ids,
                 )
         except UserAlreadyHasBot:
             try:
@@ -274,6 +291,7 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
                 "Managed bot registration failed owner_id=%s bot_id=%s error=%s",
                 owner_id, child.id, type(exc).__name__,
             )
+            await _restart_previous_poller(child.id)
             return
 
         await manager.start_tenant(tenant)

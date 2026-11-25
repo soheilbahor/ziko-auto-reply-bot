@@ -4,8 +4,8 @@ set -Eeuo pipefail
 umask 022
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  printf '[ziko-install] ERROR: Root privileges are required.\\n' >&2
-  printf '[ziko-install] Run: sudo bash install.sh\\n' >&2
+  printf '[ziko-install] ERROR: Root privileges are required.\n' >&2
+  printf '[ziko-install] Run: sudo bash install.sh\n' >&2
   exit 1
 fi
 

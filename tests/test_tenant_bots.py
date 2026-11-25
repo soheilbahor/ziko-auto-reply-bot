@@ -158,3 +158,43 @@ def test_default_poller_limit_matches_default_tenant_capacity(
         master_bot=FakeMasterBot(),
     )
     assert manager.max_concurrent_pollers == 50
+
+
+@pytest.mark.asyncio
+async def test_close_stops_pollers_and_prevents_new_supervisors(
+    tmp_path: Path,
+):
+    import asyncio
+
+    registry = FakeRegistry()
+    manager = TenantBotManager(
+        settings=SimpleNamespace(
+            database_path=tmp_path / "ziko.sqlite3",
+            admin_ids=frozenset(),
+        ),
+        registry=registry,
+        master_bot=FakeMasterBot(),
+        max_concurrent_pollers=1,
+    )
+    tenant = Tenant(
+        user_id=1001, bot_id=2001, username="shutdown_bot",
+        encrypted_token="encrypted", created_at="2026-01-01T00:00:00Z",
+        enabled=True, bot_token="token",
+    )
+    entered = asyncio.Event()
+
+    async def hold_polling(_tenant):
+        entered.set()
+        await asyncio.Event().wait()
+
+    manager._run_tenant_once = hold_polling
+    await manager.start_tenant(tenant)
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    await manager.close()
+
+    assert manager._closing is True
+    assert manager.running_count() == 0
+    assert manager.waiting_count() == 0
+    assert manager.runtime_status(tenant.bot_id) == "متوقف"
+    await manager.start_tenant(tenant)
+    assert manager._tasks == {}

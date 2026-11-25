@@ -749,10 +749,26 @@ class SchemaMigrationTests(StorageTestCase):
     async def test_version_1_database_is_upgraded_and_rows_are_kept(self) -> None:
         session = await self.activate()
         await self.db.close()
-        # Rebuild reply_deliveries exactly as it was in schema version 1 (no claim_token).
+        # Rebuild statuses and reply_deliveries exactly as they were in schema version 1.
         with closing(sqlite3.connect(self.path)) as raw:
             raw.executescript(
                 """
+                DROP TABLE IF EXISTS reply_steps;
+                DROP TABLE IF EXISTS owner_settings;
+                DROP TABLE IF EXISTS reply_exceptions;
+                CREATE TABLE statuses_v1 (
+                    key TEXT PRIMARY KEY
+                        CHECK (length(key) BETWEEN 1 AND 32 AND key NOT GLOB '*[^a-z_]*'),
+                    title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+                    emoji TEXT NOT NULL CHECK (length(trim(emoji)) > 0),
+                    reply_text TEXT NOT NULL CHECK (length(trim(reply_text)) > 0 AND length(reply_text) <= 4096),
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO statuses_v1 (key, title, emoji, reply_text, sort_order, updated_at)
+                    SELECT key, title, emoji, reply_text, sort_order, updated_at FROM statuses;
+                DROP TABLE statuses;
+                ALTER TABLE statuses_v1 RENAME TO statuses;
                 DROP TABLE reply_deliveries;
                 CREATE TABLE reply_deliveries (
                     connection_id TEXT NOT NULL REFERENCES business_connections (connection_id)
@@ -781,6 +797,12 @@ class SchemaMigrationTests(StorageTestCase):
 
         db = await self.open_db()
         self.assertEqual(self.raw_query("PRAGMA user_version")[0][0], SCHEMA_VERSION)
+        # Each existing status text became its single reply step, so behaviour is unchanged.
+        self.assertEqual(
+            self.raw_query("SELECT count(*) FROM reply_steps WHERE position = 1 AND kind = 'text' "
+                           "AND content IN (SELECT reply_text FROM statuses)")[0][0],
+            self.raw_query("SELECT count(*) FROM statuses")[0][0],
+        )
         rows = self.raw_query(
             "SELECT chat_id, state, attempts, telegram_message_id, length(claim_token) "
             "FROM reply_deliveries ORDER BY chat_id"
@@ -811,3 +833,21 @@ class CancellationSafetyTests(DeliveryTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class StatisticsTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_statistics_are_privacy_preserving_and_return_zero_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "stats.sqlite3")
+            await db.initialize()
+            try:
+                stats = await db.get_statistics()
+                self.assertEqual(stats["sent"], 0)
+                self.assertEqual(stats["failed"], 0)
+                self.assertEqual(stats["uncertain"], 0)
+                self.assertEqual(stats["pending"], 0)
+                self.assertEqual(stats["inbound_events"], 0)
+                self.assertEqual(stats["active_connections"], 0)
+            finally:
+                await db.close()

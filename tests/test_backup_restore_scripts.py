@@ -84,11 +84,11 @@ def test_platform_restore_checks_checksum_before_decryption():
 
 def test_update_script_has_code_and_platform_rollback_paths():
     updater = (ROOT / "scripts/update.sh").read_text()
-    assert "rolling back" in updater
+    assert "ROLLBACK:" in updater
     assert "tar -xzf \"$CODE_SNAPSHOT\"" in updater
     assert "restore-platform.sh" in updater
     assert "ZIKO_AGE_RECIPIENT" in updater
-    assert 'age -d -i "$identity"' in updater
+    assert 'age -d -i "$AGE_IDENTITY"' in updater
 
 
 def test_systemd_unit_contains_network_and_kernel_sandboxing():

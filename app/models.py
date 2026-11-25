@@ -25,6 +25,7 @@ class DeliveryOutcome(Enum):
     SENT = "sent"
     REJECTED = "rejected"
     UNCERTAIN = "uncertain"
+    PARTIAL = "partial"  # some parts were delivered, then a part failed; never retried
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,12 +40,36 @@ class AppState:
 
 @dataclass(frozen=True, slots=True)
 class Status:
-    """A selectable status with its editable Persian reply text."""
+    """A selectable status. ``reply_text`` mirrors its first text step (kept for compatibility)."""
 
     key: str
     title: str
     emoji: str
     reply_text: str
+    is_active: bool = True
+    reply_mode: str = "reply"  # "plain" or "reply" (quotes the incoming message)
+    min_interval_seconds: int = 0
+    active_from_hour: int | None = None  # local hour window in the owner's timezone
+    active_to_hour: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyStep:
+    """One message of a status reply: text, emoji or sticker (content = file_id)."""
+
+    position: int
+    kind: str
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerSettings:
+    """Owner preferences used to personalise replies. The contact's name is never stored."""
+
+    timezone: str
+    language: str
+    owner_name: str
+    updated_at: str
 
 
 @dataclass(frozen=True, slots=True)

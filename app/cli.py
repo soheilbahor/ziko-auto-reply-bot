@@ -19,7 +19,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 HOME = Path(os.environ.get("ZIKO_HOME", "/opt/ziko-assistant"))
@@ -40,7 +40,7 @@ def _configured_github_repo() -> str:
                     return value
     except OSError:
         pass
-    return "soheilbahor/ziko-auto-reply-bot"
+    return "ziko-freedom/ziko-auto-reply-bot"
 
 
 GITHUB_REPO = _configured_github_repo()
@@ -242,7 +242,7 @@ def _capture(cmd: list[str], timeout: float = 15) -> tuple[int, str]:
     return proc.returncode, redact((proc.stdout or "") + (proc.stderr or "")).strip()
 
 
-def _stream(cmd: list[str]) -> int:
+def _stream(cmd: list[str], line_filter: Callable[[str], bool] | None = None) -> int:
     """Run a command and print its output line by line with secrets redacted."""
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -253,7 +253,10 @@ def _stream(cmd: list[str]) -> int:
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
-            sys.stdout.write(redact(line))
+            text = redact(line)
+            if line_filter is not None and not line_filter(text):
+                continue
+            sys.stdout.write(text)
             sys.stdout.flush()
         return proc.wait()
     except KeyboardInterrupt:
@@ -574,6 +577,56 @@ def _can_read_journal() -> bool:
     return bool(names & {"adm", "systemd-journal"})
 
 
+_LOG_LEVELS = ("WARNING", "ERROR", "CRITICAL")
+
+
+def _log_directory(values: dict[str, str] | None) -> Path:
+    """Same rule as the app: ZIKO_LOG_DIR if set, otherwise <database dir>/logs."""
+    raw = ((values or {}).get("ZIKO_LOG_DIR") or "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        return path if path.is_absolute() else HOME / path
+    return _db_path(values).parent / "logs"
+
+
+def _level_filter(level: str | None) -> Callable[[str], bool] | None:
+    """Keep lines at ``level`` or above (WARNING < ERROR < CRITICAL)."""
+    if level is None:
+        return None
+    wanted = _LOG_LEVELS[_LOG_LEVELS.index(level.upper()):]
+    pattern = re.compile(r" (" + "|".join(wanted) + r") ")
+    return lambda line: bool(pattern.search(line))
+
+
+def cmd_file_logs(
+    *, bot_id: int | None = None, lines: int = 100, follow: bool = False, level: str | None = None,
+) -> int:
+    """Read ZIKO's own log files: master.log, or tenants/bot-<id>.log with --bot."""
+    values, _ = _read_env()
+    directory = _log_directory(values)
+    if bot_id is None:
+        path = directory / "master.log"
+    else:
+        path = directory / "tenants" / f"bot-{int(bot_id)}.log"
+    cmd = ["tail", "-n", str(max(1, lines)), str(path)]
+    if follow:
+        cmd.insert(1, "-F")
+    if not os.access(path.parent if not path.exists() else path, os.R_OK):
+        cmd = _as_service_user(cmd)
+    line_filter = _level_filter(level)
+    if follow:
+        rc = _stream(cmd, line_filter)
+        return 0 if rc == 130 else rc
+    rc, output = _capture(cmd)
+    if rc != 0:
+        _ui().error(f"Cannot read {path}: {output or 'no output'}")
+        return rc
+    for line in output.splitlines():
+        if line_filter is None or line_filter(line):
+            print(line)
+    return 0
+
+
 def cmd_logs(lines: int = 100, follow: bool = False) -> int:
     cmd = ["journalctl", "-u", SERVICE, "-n", str(max(1, lines)), "--no-pager", "-o", "short-iso"]
     if follow:
@@ -703,7 +756,6 @@ def cmd_uninstall(yes: bool = False) -> int:
 
 
 def _config_rows(values: dict[str, str]) -> list[tuple[str, object]]:
-    ui = _ui()
     token = values.get("BOT_TOKEN", "")
     if not token:
         token_cell = "Not configured"
@@ -1068,10 +1120,14 @@ def _build_parser() -> argparse.ArgumentParser:
     logs = sub.add_parser("logs", help="View logs (tokens are redacted)")
     logs.add_argument("-n", "--lines", type=int, default=100, help="Number of lines (default: 100)")
     logs.add_argument("-f", "--follow", action="store_true", help="Follow live logs")
+    logs.add_argument("--master", action="store_true", help="Read master.log instead of the journal")
+    logs.add_argument("--bot", type=int, metavar="BOT_ID", help="Read one child bot's log file")
+    logs.add_argument("--level", choices=["WARNING", "ERROR", "CRITICAL"],
+                      help="With --master or --bot: only lines at this level or above")
     upd = sub.add_parser("update", help="Update (scripts/update.sh)")
     upd.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     upd.add_argument("--repo", help="GitHub repository in OWNER/REPOSITORY format")
-    upd.add_argument("--version", help="Release tag, e.g. v1.2.3")
+    upd.add_argument("--version", help="Release tag, e.g. vX.Y.Z")
     upd.add_argument("--channel", choices=("stable", "beta", "dev"), default="stable",
                      help="Stable release or latest main-branch beta")
     upd.add_argument("--check", action="store_true", help="Check the selected channel without updating")
@@ -1168,7 +1224,7 @@ def _interactive() -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     if os.geteuid() != 0:
         print(
-            "Access denied: ZIKO management panel is available to root only.\\n"
+            "Access denied: ZIKO management panel is available to root only.\n"
             "Run: sudo ziko",
             file=sys.stderr,
         )
@@ -1185,6 +1241,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         c = args.command
         if c == "logs":
+            if args.master or args.bot is not None or args.level:
+                return cmd_file_logs(
+                    bot_id=args.bot, lines=args.lines, follow=args.follow, level=args.level,
+                )
             return cmd_logs(args.lines, args.follow)
         if c == "restore":
             return cmd_restore(args.file, args.yes)
