@@ -86,5 +86,8 @@ def test_managed_bot_observer_is_registered_on_root_dispatcher():
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "managed_bot_updated"
     ]
-    assert decorators == ["dispatcher.update(F.managed_bot)"]
-    assert "@router.update" not in source
+    # dispatcher.update(...) never fires (the Dispatcher's own catch-all update handler runs
+    # first and stops propagation); the typed managed_bot observer is the one aiogram calls.
+    # The behaviour is proven end to end in tests/test_managed_bot_registration.py.
+    assert decorators == ["router.managed_bot()"]
+    assert "@dispatcher.update" not in source

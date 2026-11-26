@@ -73,7 +73,9 @@ def _e(text: object) -> str:
 def groups_view(lib: rl.Library) -> tuple[str, InlineKeyboardMarkup]:
     rows = [[_btn(f"{g.emoji} {g.title}", LIB_GROUP, g.id)] for g in lib.groups]
     rows.append([_btn("⭐ علاقه‌مندی‌های من", LIB_FAVS)])
-    rows.append([_btn("🔙 بازگشت", Action.PANEL)])
+    # The library is opened from the main menu (and from Advanced). "Back" returns to the
+    # main menu; before 1.5.2 it opened the Advanced panel, which owners did not expect.
+    rows.append([_btn("🔙 بازگشت به منوی اصلی", Action.MENU)])
     text = ("📚 <b>کتابخانه پیام‌های آماده</b>\n\n"
             f"{lib.count} پیام حرفه‌ای در {sum(len(g.categories) for g in lib.groups)} دسته.\n"
             "یک گروه را انتخاب کنید؛ هر پیام را می‌توانید ببینید، ویرایش کنید و با یک لمس فعال کنید.")

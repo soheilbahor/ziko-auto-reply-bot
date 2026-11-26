@@ -1,3 +1,28 @@
+## [1.5.2] - 2026-11-26
+
+### Updates and backups without an extra command
+- `sudo ziko` -> Update (and `ziko update`, `ziko update rollback`, Backup now) no longer
+  need `export ZIKO_AGE_RECIPIENT=...`. The backup key is taken, in this order, from the
+  environment, from `ZIKO_AGE_RECIPIENT` in `/etc/ziko-assistant/ziko.env`, or derived from
+  the root-only identity `/etc/ziko-assistant/backup-age-identity` with `age-keygen -y`.
+- Derivation only uses an identity that is a regular, root-owned file with mode 0400/0600.
+  A configured key that does not match the identity is refused, because backups made with
+  it could not be decrypted on this server. Only the public key is printed, shortened.
+- `--check` (read-only) still needs no key. Backups stay mandatory and encrypted.
+
+### Fixed
+- **Child bots created with /create_bot were never registered** (critical, since 1.4.x).
+  The managed-bot handler was attached to `dispatcher.update`, which aiogram never calls
+  for it (its own catch-all update handler runs first), so Telegram's `managed_bot`
+  update was logged as "not handled": no registration, no polling, no answer to `/start`.
+  It now uses the typed `managed_bot` observer; a test feeds a real update through the
+  real Dispatcher. Bots created before this fix must be re-created or connected with
+  their token (see below).
+- Reply library: Back on the first library screen opened the Advanced panel; it now
+  returns to the main menu.
+- Managed bot creation: a refusal because the owner already has a ZIKO bot is now logged
+  (`reason=UserAlreadyHasBot`); before, the new bot disappeared without a log line.
+
 ## [1.5.1] - 2026-11-26
 
 ### Terminal panel (`sudo ziko`)

@@ -27,8 +27,10 @@
 #   sudo scripts/update.sh --check               # only report versions
 #   sudo scripts/update.sh --repo OWNER/REPOSITORY
 #
-# Required: ZIKO_AGE_RECIPIENT (public key) and an age identity at
-# /etc/ziko-assistant/backup-age-identity (root-owned, mode 0400 or 0600).
+# Required: an age identity at /etc/ziko-assistant/backup-age-identity (root-owned, mode
+# 0400 or 0600). The backup recipient (its PUBLIC key) is taken from ZIKO_AGE_RECIPIENT,
+# else from ZIKO_AGE_RECIPIENT in the env file, else derived from the identity with
+# `age-keygen -y`. A recipient that does not match the identity is refused.
 # Environment overrides: ZIKO_REPO, ZIKO_SERVICE, ZIKO_USER, ZIKO_ROOT, ZIKO_HEALTH_SECONDS,
 # ZIKO_KEEP_CODE_SNAPSHOTS, ZIKO_BASE_URL, ZIKO_API_URL, ZIKO_HEALTH_TELEGRAM (1 default, 0 off),
 # ZIKO_UNIT_FILE, ZIKO_LOCK_FILE, ZIKO_ENV_FILE, ZIKO_AGE_IDENTITY, ZIKO_BACKUP_DIR, ZIKO_DB_PATH.
@@ -118,6 +120,37 @@ usage() { sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 # A failure needs rollback once anything has changed: the service was stopped, or the
 # Python environment was modified (the old requirements must be restored).
 needs_rollback() { [[ "$STOPPED" -eq 1 || "$DEPS_CHANGED" -eq 1 ]]; }
+
+# age public key: "age1" + 58 bech32 characters (no b, i, o, 1).
+AGE_RECIPIENT_RE='^age1[02-9ac-hj-np-z]{58}$'
+
+# Sets and exports ZIKO_AGE_RECIPIENT for the mandatory encrypted backups. Only the public
+# key is ever printed (shortened); the identity's secret never leaves age-keygen.
+resolve_age_recipient() {
+  local value="${ZIKO_AGE_RECIPIENT:-}" origin="environment" derived=""
+  if [[ -z "$value" && -r "$ENV_FILE" ]]; then
+    value="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?ZIKO_AGE_RECIPIENT=//p' "$ENV_FILE" \
+      | tail -n1 | tr -d "\"'[:space:]")"
+    [[ -n "$value" ]] && origin="$ENV_FILE"
+  fi
+  if [[ -f "$AGE_IDENTITY" && ! -L "$AGE_IDENTITY" ]] \
+     && [[ "$(stat -c '%u:%a' "$AGE_IDENTITY")" =~ ^0:(400|600)$ ]] \
+     && command -v age-keygen >/dev/null 2>&1; then
+    derived="$(age-keygen -y "$AGE_IDENTITY" 2>/dev/null | head -n1 | tr -d '[:space:]')" || derived=""
+  fi
+  if [[ -z "$value" ]]; then
+    [[ -n "$derived" ]] || die "no backup key: set ZIKO_AGE_RECIPIENT, or install the root-only age identity at $AGE_IDENTITY (mode 0400/0600) and age-keygen (package: age)"
+    value="$derived"
+    origin="derived from $AGE_IDENTITY"
+  fi
+  [[ "$value" =~ $AGE_RECIPIENT_RE ]] || die "ZIKO_AGE_RECIPIENT ($origin) is not an age public key (age1...)"
+  if [[ -n "$derived" && "$value" != "$derived" ]]; then
+    die "ZIKO_AGE_RECIPIENT ($origin) does not belong to $AGE_IDENTITY: backups made with it could not be decrypted here"
+  fi
+  ZIKO_AGE_RECIPIENT="$value"
+  export ZIKO_AGE_RECIPIENT
+  log "backup key: ${value:0:12}... ($origin)"
+}
 
 is_preserved() {
   local name="$1" p
@@ -507,6 +540,8 @@ main() {
   install -d -m 755 "$(dirname "$LOCK_FILE")"
   exec 9>"$LOCK_FILE"
   flock -n 9 || die "another update is running"
+  # Read-only checks need no backup key; updates and rollbacks always make one.
+  [[ "$CHECK_ONLY" -eq 1 ]] || resolve_age_recipient
 
   WORK="$(mktemp -d)"
   # Traverse-only for other users: the service user must reach $WORK/stage (scripts run

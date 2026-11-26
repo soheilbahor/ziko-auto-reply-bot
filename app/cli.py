@@ -639,15 +639,62 @@ def cmd_logs(lines: int = 100, follow: bool = False) -> int:
     return 0 if rc == 130 else rc
 
 
+_AGE_RECIPIENT = re.compile(r"age1[02-9ac-hj-np-z]{58}")
+_AGE_IDENTITY_DEFAULT = "/etc/ziko-assistant/backup-age-identity"
+
+
+def _age_recipient(values: dict[str, str] | None = None) -> tuple[str | None, str]:
+    """Backup recipient (an age PUBLIC key) and where it came from, same order as update.sh:
+    the environment, then the config file, then derived from the root-only identity.
+
+    Returns (None, reason) when none is usable; the identity's secret is never read here,
+    only ``age-keygen -y`` (which prints the public key) touches it.
+    """
+    value = os.environ.get("ZIKO_AGE_RECIPIENT", "").strip()
+    origin = "environment"
+    if not value:
+        value = ((values or {}).get("ZIKO_AGE_RECIPIENT") or "").strip().strip("\"'")
+        origin = "config"
+    if not value:
+        identity = Path(os.environ.get("ZIKO_AGE_IDENTITY") or _AGE_IDENTITY_DEFAULT)
+        try:
+            st = identity.lstat()
+        except OSError:
+            return None, f"no backup key and no identity at {identity}"
+        import stat as _stat
+        if not _stat.S_ISREG(st.st_mode) or st.st_uid != 0 or _stat.S_IMODE(st.st_mode) not in (0o400, 0o600):
+            return None, f"{identity} must be a regular root-owned file with mode 0400 or 0600"
+        try:
+            out = subprocess.run(["age-keygen", "-y", str(identity)], capture_output=True, text=True,
+                                 timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None, "age-keygen is not installed (package: age)"
+        lines = out.stdout.split()
+        value, origin = (lines[0] if out.returncode == 0 and lines else ""), "derived"
+        if not value:
+            return None, f"age-keygen could not read {identity}"
+    if not _AGE_RECIPIENT.fullmatch(value):
+        return None, f"ZIKO_AGE_RECIPIENT ({origin}) is not an age public key (age1...)"
+    return value, origin
+
+
 def cmd_backup() -> int:
     ui = _ui()
     script = _script("backup.sh")
     if not script:
         return 1
+    values, _problem = _read_env()
+    recipient, origin = _age_recipient(values)
+    if recipient is None:
+        ui.error(f"Backup not started: {origin}.")
+        return 1
+    if origin == "derived":
+        ui.info(f"Backup key derived from the server identity: {recipient[:12]}...")
+    env = {**os.environ, "ZIKO_AGE_RECIPIENT": recipient}
     forwarded_env = [
-        f"{name}={os.environ[name]}"
+        f"{name}={env[name]}"
         for name in ("ZIKO_AGE_RECIPIENT", "ZIKO_AGE_IDENTITY")
-        if os.environ.get(name)
+        if env.get(name)
     ]
     rc = _stream(_as_service_user(["env", *forwarded_env, "bash", str(script)]))
     if rc == 0:

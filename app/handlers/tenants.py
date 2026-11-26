@@ -228,12 +228,14 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
 
     dispatcher.update.outer_middleware(_log_managed_bot_arrival)
 
-    # ``update`` is a root-Dispatcher observer in aiogram; child Routers do not expose it.
-    @dispatcher.update(F.managed_bot)
-    async def managed_bot_updated(update: Update, bot: Bot) -> None:
-        event = update.managed_bot
-        if event is None:
-            logger.warning("Managed bot handler received an update without managed_bot payload")
+    # Must be the typed ``managed_bot`` observer. A handler on ``dispatcher.update`` never
+    # runs: the Dispatcher registers its own catch-all ``update`` handler first, and an
+    # observer stops at the first matching handler, so every managed_bot update was logged
+    # "is not handled" and the new bot was never registered (bug in 1.4.x-1.5.1).
+    @router.managed_bot()
+    async def managed_bot_updated(event: Any, bot: Bot) -> None:
+        if event is None or getattr(event, "bot_user", None) is None:
+            logger.warning("Managed bot handler received an event without a bot_user")
             return
         owner_id = event.user.id
         child = event.bot_user
@@ -290,6 +292,9 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
                     allow_multiple=owner_id in admin_ids,
                 )
         except UserAlreadyHasBot:
+            # Was silent before 1.5.2: the new bot then looked "lost" in the logs.
+            logger.warning("Managed bot not registered reason=UserAlreadyHasBot owner_id=%s bot_id=%s",
+                           owner_id, child.id)
             try:
                 await bot.send_message(
                     owner_id,
@@ -310,8 +315,8 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
             await _restart_previous_poller(child.id)
             return
 
-        await manager.start_tenant(tenant)
         logger.info("Managed bot registered owner_id=%s bot_id=%s", owner_id, child.id)
+        await manager.start_tenant(tenant)
         try:
             await bot.send_message(
                 owner_id,

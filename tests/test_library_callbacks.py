@@ -159,3 +159,12 @@ async def test_stranger_cannot_finish_library_edit_via_forged_state(admin: Any) 
     await admin.press(STRANGER_ID, panel.LibCB(action=panel.LIB_EDIT, item="store_welcome.1").pack())
     await admin.send_text(STRANGER_ID, "متن جعلی")
     assert await admin.snapshot() == before
+
+
+def test_library_back_button_returns_to_the_main_menu():
+    """Regression: the library's Back opened the Advanced panel instead of the main menu."""
+    from app.keyboards.admin import Action, AdminCB
+    _text, kb = panel.groups_view(LIB)
+    back = all_buttons(kb)[-1]
+    assert AdminCB.unpack(back.callback_data).action == Action.MENU
+    assert "بازگشت" in back.text

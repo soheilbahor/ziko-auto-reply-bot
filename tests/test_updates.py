@@ -367,3 +367,104 @@ def test_permission_rule_gives_the_service_user_read_but_never_write(tmp_path):
     assert mode(tree / "VERSION") == 0o644 and mode(tree / "app" / "main.py") == 0o644
     assert mode(tree / "app") == 0o755 and mode(tree) == 0o755
     assert mode(tree / "install.sh") == 0o755                                # executables keep x
+
+
+# --------------------------------------------------------------------------- 1.5.2 backup key
+# The updater finds the backup recipient itself, so `sudo ziko` -> Update needs no export.
+KEY = "age1" + "q" * 58
+OTHER = "age1" + "p" * 58
+
+
+def _resolver_harness() -> str:
+    script = _update_sh()
+    start = script.index("AGE_RECIPIENT_RE=")
+    end = script.index("\n}\n", script.index("resolve_age_recipient() {")) + 3
+    return ("set -Eeuo pipefail\n"
+            'log() { printf "LOG %s\\n" "$*"; }\n'
+            'die() { printf "DIE %s\\n" "$*"; exit 1; }\n'
+            + script[start:end]
+            + 'resolve_age_recipient\nprintf "RESULT %s\\n" "$ZIKO_AGE_RECIPIENT"\n')
+
+
+def run_resolver(tmp_path, *, env_key=None, env_file=None, identity_mode=None, stub_key=KEY):
+    import subprocess
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "age-keygen"
+    stub.write_text(f"#!/bin/sh\necho {stub_key}\n")
+    stub.chmod(0o755)
+    identity = tmp_path / "backup-age-identity"
+    if identity_mode is not None:
+        identity.write_text("placeholder identity (tests only)\n")
+        identity.chmod(identity_mode)
+    envf = tmp_path / "ziko.env"
+    if env_file is not None:
+        envf.write_text(env_file)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "ENV_FILE": str(envf), "AGE_IDENTITY": str(identity)}
+    if env_key is not None:
+        env["ZIKO_AGE_RECIPIENT"] = env_key
+    proc = subprocess.run(["bash", "-c", _resolver_harness()], env=env, capture_output=True, text=True,
+                          timeout=20)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _is_root() -> bool:
+    import os
+    return os.geteuid() == 0
+
+
+def test_backup_key_from_environment(tmp_path):
+    rc, out = run_resolver(tmp_path, env_key=KEY)
+    assert rc == 0 and f"RESULT {KEY}" in out and "(environment)" in out
+
+
+def test_backup_key_from_env_file(tmp_path):
+    rc, out = run_resolver(tmp_path, env_file=f'BOT_TOKEN=x\nexport ZIKO_AGE_RECIPIENT="{KEY}"\n')
+    assert rc == 0 and f"RESULT {KEY}" in out and "ziko.env" in out
+
+
+def test_no_backup_key_and_no_identity_is_refused(tmp_path):
+    rc, out = run_resolver(tmp_path)
+    assert rc == 1 and "DIE no backup key" in out
+
+
+def test_malformed_backup_key_is_refused(tmp_path):
+    rc, out = run_resolver(tmp_path, env_key="age1testrecipient")
+    assert rc == 1 and "is not an age public key" in out
+
+
+def test_log_never_prints_the_whole_key(tmp_path):
+    _rc, out = run_resolver(tmp_path, env_key=KEY)
+    logs = [line for line in out.splitlines() if line.startswith("LOG")]
+    assert logs and all(KEY not in line for line in logs)
+
+
+@pytest.mark.skipif(_is_root(), reason="as root the file is root-owned; covered by the root tests")
+def test_identity_not_owned_by_root_is_never_used(tmp_path):
+    rc, out = run_resolver(tmp_path, identity_mode=0o600)
+    assert rc == 1 and "DIE no backup key" in out
+
+
+@pytest.mark.skipif(not _is_root(), reason="needs a root-owned identity file (run with sudo)")
+def test_backup_key_is_derived_from_the_root_identity(tmp_path):
+    rc, out = run_resolver(tmp_path, identity_mode=0o600)
+    assert rc == 0 and f"RESULT {KEY}" in out and "derived from" in out
+
+
+@pytest.mark.skipif(not _is_root(), reason="needs a root-owned identity file (run with sudo)")
+def test_key_that_does_not_match_the_identity_is_refused(tmp_path):
+    rc, out = run_resolver(tmp_path, env_key=OTHER, identity_mode=0o600)
+    assert rc == 1 and "does not belong to" in out
+
+
+@pytest.mark.skipif(not _is_root(), reason="needs a root-owned identity file (run with sudo)")
+def test_world_readable_identity_is_not_used(tmp_path):
+    rc, out = run_resolver(tmp_path, identity_mode=0o644)
+    assert rc == 1 and "DIE no backup key" in out
+
+
+def test_resolver_runs_for_updates_and_rollbacks_but_not_checks():
+    body = _main_body(_update_sh())
+    call = body.index('[[ "$CHECK_ONLY" -eq 1 ]] || resolve_age_recipient')
+    assert body.index('flock -n 9') < call < body.index('manual_rollback "$ROLLBACK_TO"')
+    assert call < body.index("stage BACKUP_START")
