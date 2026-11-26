@@ -168,3 +168,11 @@ def test_library_back_button_returns_to_the_main_menu():
     back = all_buttons(kb)[-1]
     assert AdminCB.unpack(back.callback_data).action == Action.MENU
     assert "بازگشت" in back.text
+
+
+
+def test_onboarding_keyboard_offers_check_library_and_menu():
+    from app.keyboards.admin import AdminCB, onboarding_keyboard
+    buttons = [b for row in onboarding_keyboard().inline_keyboard for b in row]
+    actions = [AdminCB.unpack(b.callback_data).action for b in buttons]
+    assert actions == ["diag", "lib", "menu"]

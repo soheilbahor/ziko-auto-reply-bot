@@ -386,6 +386,7 @@ class TenantBotManager:
             await self._sync_profile_photo(bot, tenant)
             dp.include_router(create_admin_router(
                 db, tenant_settings, log_path=log_file_for_bot(self.log_dir, tenant.bot_id),
+                onboarding=True,
             ))
             dp.include_router(create_business_router(db, tenant_settings))
 

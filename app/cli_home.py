@@ -371,42 +371,118 @@ _STATE_VIEW = {
     "failed": ("🔴", "[x]", "failed", "bad"),
     "unknown": ("⚪", "[?]", "unknown", "dim"),
 }
+TAGLINE = "Telegram Business Auto-Reply Assistant"
+WIDE = 110          # side-by-side Telegram / System panels from this width
+C_PILL = "#0b2233"
+
+# 3-row block lettering; every glyph row has the same width.
+_LOGO = {
+    "Z": ("▀▀▀█", " ▄▀ ", "█▄▄▄"),
+    "I": ("█", "█", "█"),
+    "K": ("█ ▄▀", "██  ", "█ ▀▄"),
+    "O": ("█▀▀█", "█  █", "█▄▄█"),
+}
+_GRADIENT = ((34, 211, 238), (167, 139, 250))
 
 
 def _e(ascii_only: bool, fancy: str, plain: str = "") -> str:
     return plain if ascii_only else fancy
 
 
-def _panel(body: RenderableType, title: str, colour: str) -> Panel:
+def _panel(body: RenderableType, title: str, colour: str, height: int | None = None) -> Panel:
     return Panel(body, title=f"[bold {colour}]{title}", title_align="left", border_style=C_EDGE,
-                 box=box.ROUNDED, padding=(0, 1))
+                 box=box.ROUNDED, padding=(0, 1), height=height)
 
 
-def header(m: HomeModel, ascii_only: bool = False) -> Table:
-    g = Table.grid(padding=(0, 1))
-    g.add_column(style=C_DIM, no_wrap=True)
-    g.add_column()
-    ver = Text(f"v{m.version.removeprefix('v')}" if m.version else "unknown", style=f"bold {C_VIOLET}")
-    ver.append("  " + _e(ascii_only, "✅ " if m.update_level == "ok" else "🔼 ") + m.update_text,
-               style=level_style(m.update_level))
-    g.add_row("Version", ver)
+def _height(renderable: RenderableType, width: int) -> int:
+    """Rendered line count at ``width`` (used to give side-by-side panels equal height)."""
+    import io
+
+    from rich.console import Console
+    probe = Console(width=max(width, 10), file=io.StringIO(), color_system=None)
+    return len(probe.render_lines(renderable, probe.options, pad=False))
+
+
+def logo(ascii_only: bool = False) -> Text:
+    if ascii_only:
+        return Text("ZIKO", style=f"bold {C_CYAN}")
+    rows = [" ".join(_LOGO[ch][i] for ch in "ZIKO") for i in range(3)]
+    span = max(len(r) for r in rows) - 1
+    out = Text()
+    for n, row in enumerate(rows):
+        for x, ch in enumerate(row):
+            if ch == " ":
+                out.append(" ")
+                continue
+            r, g, b = (round(a + (c - a) * x / span) for a, c in zip(*_GRADIENT))
+            out.append(ch, style=f"bold rgb({r},{g},{b})")
+        if n < len(rows) - 1:
+            out.append("\n")
+    return out
+
+
+def version_pill(m: HomeModel, ascii_only: bool = False) -> Text:
+    ver = f"v{m.version.removeprefix('v')}" if m.version else "version unknown"
+    mark = {"ok": ("✓", "OK"), "warn": ("↑", "!"), "info": ("·", "-")}.get(m.update_level, ("·", "-"))
+    pill = Text.assemble((f" {ver} ", f"bold {C_VIOLET}"),
+                         (f" {_e(ascii_only, mark[0], mark[1])} {m.update_text} ", level_style(m.update_level)))
+    if not ascii_only:
+        pill.stylize(f"on {C_PILL}")
+    return pill
+
+
+def _status_grid(m: HomeModel, ascii_only: bool, two_columns: bool) -> Table:
     svc_level = "ok" if m.service_state == "active" else "bad"
-    svc = Text(f"{_e(ascii_only, '●', '*')} {m.service_state}", style=f"bold {level_style(svc_level)}")
-    if m.service_uptime_s is not None:
-        svc.append(f"  ·  up {human_duration(m.service_uptime_s)}", style=C_TEXT)
-    g.add_row("Service", svc)
-    if m.host:
-        g.add_row("Host", Text(m.host, style=C_TEXT))
+    service = Text(f"{_e(ascii_only, '●', '*')} {m.service_state}", style=f"bold {level_style(svc_level)}")
+    uptime = Text(human_duration(m.service_uptime_s), style=f"bold {C_TEXT}")
+    host = Text(m.host or "n/a", style=C_TEXT)
     if m.last_backup_at:
         age = max(0.0, m.taken_at - m.last_backup_at)
-        g.add_row("Last backup", Text(f"{_e(ascii_only, '🔐 ')}{human_duration(age)} ago",
-                                      style=level_style("ok" if age < 86400 * 2 else "warn")))
+        backup = Text(f"{_e(ascii_only, '🔐 ')}{human_duration(age)} ago",
+                      style=f"bold {level_style('ok' if age < 86400 * 2 else 'warn')}")
     else:
-        g.add_row("Last backup", Text("none found", style=level_style("warn")))
+        backup = Text("none found", style=f"bold {level_style('warn')}")
+    g = Table.grid(padding=(0, 1))
+    pairs = [("Service:", service), ("Uptime:", uptime), ("Host:", host), ("Last backup:", backup)]
+    if two_columns:
+        for _ in range(2):
+            g.add_column(style=C_DIM, no_wrap=True)
+            g.add_column(no_wrap=True, overflow="ellipsis")
+        g.add_row(pairs[0][0], pairs[0][1], " " + pairs[1][0], pairs[1][1])
+        g.add_row(pairs[2][0], pairs[2][1], " " + pairs[3][0], pairs[3][1])
+    else:
+        g.add_column(style=C_DIM, no_wrap=True)
+        g.add_column(no_wrap=True, overflow="ellipsis")
+        for label, value in pairs:
+            g.add_row(label, value)
     return g
 
 
-def telegram_panel(m: HomeModel, ascii_only: bool = False) -> Panel:
+def header(m: HomeModel, ascii_only: bool = False, width: int = 120) -> RenderableType:
+    """Logo, product line, version pill, and service / uptime / host / last backup."""
+    brand = Table.grid(padding=(0, 0))
+    brand.add_column(no_wrap=True, overflow="ellipsis")
+    brand.add_row(Text(TAGLINE, style=f"bold {C_TEXT}"))
+    brand.add_row(version_pill(m, ascii_only))
+    if width >= WIDE:
+        g = Table.grid(expand=True, padding=(0, 3))
+        g.add_column(no_wrap=True)
+        g.add_column(no_wrap=True, overflow="ellipsis")
+        g.add_column(justify="right", no_wrap=True)
+        g.add_row(logo(ascii_only), brand, _status_grid(m, ascii_only, two_columns=True))
+        return g
+    top = Table.grid(padding=(0, 3))
+    top.add_column(no_wrap=True)
+    top.add_column(no_wrap=True, overflow="ellipsis")
+    top.add_row(logo(ascii_only), brand)
+    return Group(top, _status_grid(m, ascii_only, two_columns=width >= 72))
+
+
+def telegram_panel(m: HomeModel, ascii_only: bool = False, height: int | None = None) -> Panel:
+    return _panel(_telegram_body(m, ascii_only), _e(ascii_only, "📨 Telegram", "Telegram"), C_CYAN, height)
+
+
+def _telegram_body(m: HomeModel, ascii_only: bool) -> Table:
     g = Table.grid(padding=(0, 1))
     g.add_column(style=C_DIM, no_wrap=True, width=15)
     g.add_column(no_wrap=True, overflow="ellipsis")
@@ -415,7 +491,7 @@ def telegram_panel(m: HomeModel, ascii_only: bool = False) -> Panel:
     label, level = api_view.get(m.bot_api, api_view["unknown"])
     g.add_row(_e(ascii_only, "📡 Bot API", "Bot API"),
               Text.assemble((f"{_e(ascii_only, '●', '*')} {label}", f"bold {level_style(level)}"),
-                            (f"   {API_HOST}", C_DIM)))
+                            (f" ({API_HOST})", C_DIM)))
     lvl = ping_level(m.ping_ms)
     if m.ping_ms is None:
         ping = Text.assemble((_e(ascii_only, "🔴 ", "[x] ") + "unreachable", f"bold {C_BAD}"),
@@ -425,14 +501,15 @@ def telegram_panel(m: HomeModel, ascii_only: bool = False) -> Panel:
         ping = Text.assemble((f"{m.ping_ms:.0f} ms ", f"bold {level_style(lvl)}"),
                              (_e(ascii_only, dot[0] + " ") + dot[1], level_style(lvl)))
         if len(m.ping_history) >= 2:
-            ping.append(f"   min {min(m.ping_history):.0f} · max {max(m.ping_history):.0f}", style=C_DIM)
+            ping.append(f"  (min {min(m.ping_history):.0f} · max {max(m.ping_history):.0f})", style=C_DIM)
     g.add_row(_e(ascii_only, "⚡ Ping (TCP)", "Ping (TCP)"), ping)
     if len(m.ping_history) >= 2 and not ascii_only:
         hi = max(max(m.ping_history), PING_GOOD_MS / 2)
         g.add_row("", Text.assemble(sparkline(m.ping_history, 0, hi, C_BLUE),
                                     (f"  {len(m.ping_history)} samples", C_DIM)))
-    if m.master_username:
-        g.add_row(_e(ascii_only, "🤖 Master bot", "Master bot"), Text("@" + m.master_username, style=C_TEXT))
+    g.add_row(_e(ascii_only, "🤖 Master bot", "Master bot"),
+              Text("@" + m.master_username, style=f"bold {C_TEXT}") if m.master_username
+              else Text("n/a", style=C_DIM))
     c = m.child_counts
     if c:
         kids = Text.assemble((f"{c.get('running', 0)} running", f"bold {C_OK}"),
@@ -443,78 +520,134 @@ def telegram_panel(m: HomeModel, ascii_only: bool = False) -> Panel:
     else:
         kids = Text(m.snapshot_problem or "none registered", style=C_DIM)
     g.add_row(_e(ascii_only, "👶 Child bots", "Child bots"), kids)
-    if m.last_success_age_s is not None:
-        g.add_row(_e(ascii_only, "🕒 Last API ok", "Last API ok"),
-                  Text(f"{human_duration(m.last_success_age_s)} ago", style=C_TEXT))
-    if m.rate_limited is not None:
-        g.add_row(_e(ascii_only, "🚦 Rate limits", "Rate limits"),
-                  Text(f"{m.rate_limited} × 429 since service start",
-                       style=level_style("ok" if not m.rate_limited else "warn")))
-    return _panel(g, _e(ascii_only, "🌐 Telegram", "Telegram"), C_CYAN)
+    g.add_row(_e(ascii_only, "🕒 Last API ok", "Last API ok"),
+              Text(f"{_e(ascii_only, '✓ ')}{human_duration(m.last_success_age_s)} ago", style=C_OK)
+              if m.last_success_age_s is not None else Text("n/a", style=C_DIM))
+    g.add_row(_e(ascii_only, "🚦 Rate limits", "Rate limits"),
+              Text(f"{m.rate_limited} × 429 since service start",
+                   style=level_style("ok" if not m.rate_limited else "warn"))
+              if m.rate_limited is not None else Text("n/a", style=C_DIM))
+    return g
 
 
-def system_panel(m: HomeModel, ascii_only: bool = False) -> Panel:
+GAUGE_WIDTH = 11
+
+
+def gauge(label: str, pct: float | None, ascii_only: bool = False) -> Table:
+    """Compact meter card: label, big value, bar (terminal stand-in for a ring gauge)."""
+    style = level_style(usage_level(pct))
+    g = Table.grid()
+    g.add_column(justify="center", width=GAUGE_WIDTH, no_wrap=True)
+    g.add_row(Text(label, style=f"bold {C_TEXT}"))
+    g.add_row(Text("n/a" if pct is None else f"{pct:.1f}%", style=f"bold {style}" if pct is not None else C_DIM))
+    inner = GAUGE_WIDTH - 2
+    filled = 0 if pct is None else max(0, min(inner, round(pct / 100 * inner)))
+    full, empty = ("#", "-") if ascii_only else ("█", "░")
+    g.add_row(Text.assemble((full * filled, style), (empty * (inner - filled), C_DIM if ascii_only else C_EDGE)))
+    return g
+
+
+def _system_details(m: HomeModel, ascii_only: bool) -> Table:
     g = Table.grid(padding=(0, 1))
-    g.add_column(style=C_DIM, no_wrap=True, width=9)
+    g.add_column(style=C_DIM, no_wrap=True)
     g.add_column(no_wrap=True, overflow="ellipsis")
-    g.add_row(_e(ascii_only, "🧠 CPU", "CPU"), bar(m.cpu_percent, ascii_only=ascii_only))
-    extra = []
-    if m.cores:
-        extra.append(f"{m.cores} cores")
+    extra = [f"{m.cores} cores" if m.cores else "cores n/a"]
     if m.load_avg:
         extra.append(f"load {m.load_avg[0]:.2f}")
-    line = sparkline(m.cpu_history, 0, 100, C_VIOLET) if len(m.cpu_history) >= 2 and not ascii_only else Text()
-    g.add_row("", line + Text(("  " if line.plain else "") + " · ".join(extra), style=C_DIM))
-    g.add_row(_e(ascii_only, "💾 RAM", "RAM"), bar(m.mem_percent, ascii_only=ascii_only))
-    line = sparkline(m.mem_history, 0, 100, C_BLUE) if len(m.mem_history) >= 2 and not ascii_only else Text()
-    g.add_row("", line + Text(("  " if line.plain else "") +
-                              f"{human_bytes(m.mem_used)} / {human_bytes(m.mem_total)}", style=C_DIM))
-    g.add_row(_e(ascii_only, "💽 Disk", "Disk"), bar(m.disk_percent, ascii_only=ascii_only))
-    g.add_row("", Text(f"{human_bytes(m.disk_used)} / {human_bytes(m.disk_total)} · DB {human_bytes(m.db_size)}",
-                       style=C_DIM))
+    g.add_row(_e(ascii_only, "🧠", "CPU "), Text(" · ".join(extra), style=C_TEXT))
+    g.add_row(_e(ascii_only, "💾", "Mem "), Text(f"{human_bytes(m.mem_used)} / {human_bytes(m.mem_total)}", style=C_TEXT))
+    g.add_row(_e(ascii_only, "💽", "Disk"),
+              Text(f"{human_bytes(m.disk_used)} / {human_bytes(m.disk_total)} · DB {human_bytes(m.db_size)}",
+                   style=C_TEXT))
     if m.net_rx_s is None:
-        net = Text("measuring… (next refresh)", style=C_DIM)
+        net = Text("Net measuring… (next refresh)", style=C_DIM)
     else:
         down, up = ("rx", "tx") if ascii_only else ("↓", "↑")
-        net = Text.assemble((f"{down} {human_bytes(m.net_rx_s)}/s  ", C_TEXT), (f"{up} {human_bytes(m.net_tx_s)}/s", C_DIM))
-    g.add_row(_e(ascii_only, "🌐 Net", "Net"), net)
+        net = Text.assemble(("Net ", C_DIM), (f"{down} {human_bytes(m.net_rx_s)}/s", C_TEXT),
+                            (f" · {up} {human_bytes(m.net_tx_s)}/s", C_TEXT))
+    g.add_row(_e(ascii_only, "🌐", "Net "), net)
     if m.service_rss is not None:
-        g.add_row(_e(ascii_only, "🔧 ZIKO", "ZIKO"),
-                  Text(f"{human_bytes(m.service_rss)} RAM · {m.service_cpu or 0:.1f}% CPU", style=C_TEXT))
-    return _panel(g, _e(ascii_only, "💻 System", "System"), C_VIOLET)
+        g.add_row(_e(ascii_only, "⚡", "ZIKO"),
+                  Text.assemble(("ZIKO: ", C_DIM), (f"{human_bytes(m.service_rss)} RAM", f"bold {C_TEXT}"),
+                                (f" · {m.service_cpu or 0:.1f}% CPU", C_TEXT)))
+    if len(m.cpu_history) >= 2 and not ascii_only:
+        g.add_row("📈", Text.assemble(sparkline(m.cpu_history, 0, 100, C_VIOLET), ("  CPU trend", C_DIM)))
+    return g
 
 
-def bots_panel(m: HomeModel, ascii_only: bool = False, limit: int = 8) -> Panel | None:
+def _system_body(m: HomeModel, ascii_only: bool, inner_width: int) -> RenderableType:
+    meters = Table.grid(padding=(0, 1))
+    for _ in range(3):
+        meters.add_column()
+    meters.add_row(gauge("CPU", m.cpu_percent, ascii_only), gauge("RAM", m.mem_percent, ascii_only),
+                   gauge("Disk", m.disk_percent, ascii_only))
+    details = _system_details(m, ascii_only)
+    meters_width = 3 * GAUGE_WIDTH + 2
+    if inner_width >= meters_width + 30:
+        body = Table.grid(expand=True, padding=(0, 2))
+        body.add_column(width=meters_width, no_wrap=True)
+        body.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+        body.add_row(meters, details)
+        return body
+    return Group(meters, Text(""), details)
+
+
+def system_panel(m: HomeModel, ascii_only: bool = False, width: int = 60, height: int | None = None) -> Panel:
+    return _panel(_system_body(m, ascii_only, max(10, width - 4)),
+                  _e(ascii_only, "💻 System", "System"), C_VIOLET, height)
+
+
+BOT_NAME_MAX = 32
+
+
+def bots_panel(m: HomeModel, ascii_only: bool = False, limit: int = 8, width: int = 120) -> Panel | None:
     if not m.bots:
         return None
     t = Table(box=box.SIMPLE_HEAD, expand=True, header_style=f"bold {C_DIM}", border_style=C_EDGE,
-              pad_edge=False)
-    for col, justify in (("Bot", "left"), ("Role", "left"), ("State", "left"), ("API p50", "right"),
-                         ("Note", "left")):
-        t.add_column(col, justify=justify, overflow="ellipsis", no_wrap=True)
-    for b in m.bots[:limit]:
+              pad_edge=False, show_edge=False)
+    t.add_column("#", justify="right", no_wrap=True, style=C_DIM, width=2)
+    t.add_column("Bot", no_wrap=True, overflow="ellipsis", max_width=BOT_NAME_MAX, min_width=12, ratio=4)
+    if width >= 72:
+        t.add_column("Role", no_wrap=True, overflow="ellipsis", width=6)
+    t.add_column("State", no_wrap=True, overflow="ellipsis", width=12)
+    t.add_column("API p50", justify="right", no_wrap=True, width=8)
+    t.add_column("Note", no_wrap=True, overflow="ellipsis", ratio=3)
+    for n, b in enumerate(m.bots[:limit], 1):
         icon, plain, label, level = _STATE_VIEW.get(b.state, _STATE_VIEW["unknown"])
-        t.add_row("@" + b.username, b.role, Text(f"{_e(ascii_only, icon, plain)} {label}", style=level_style(level)),
-                  "n/a" if b.ping_ms is None else f"{b.ping_ms:.0f} ms",
-                  Text(b.note or "—", style=level_style(b.note_level)))
+        name = Text("@" + b.username, style=f"bold {C_CYAN}")
+        name.truncate(BOT_NAME_MAX, overflow="ellipsis")
+        cells: list[RenderableType] = [str(n), name]
+        if width >= 72:
+            cells.append(Text(b.role, style=C_VIOLET if b.role == "master" else C_BLUE))
+        cells += [Text(f"{_e(ascii_only, icon, plain)} {label}", style=level_style(level)),
+                  Text("n/a" if b.ping_ms is None else f"{b.ping_ms:.0f} ms", style=f"bold {C_TEXT}"),
+                  Text(b.note or "—" if not ascii_only else (b.note or "-"),
+                       style=C_WARN if b.note and b.note_level == "dim" else level_style(b.note_level))]
+        t.add_row(*cells)
     more = len(m.bots) - limit
-    title = _e(ascii_only, "🤖 Bots", "Bots") + (f"  (+{more} more: ziko bots status)" if more > 0 else "")
+    title = _e(ascii_only, "👥 ", "") + f"Bots ({len(m.bots)})"
+    if more > 0:
+        title += f"  +{more} more: ziko bots status"
     return _panel(t, title, C_BLUE)
 
 
 def render(m: HomeModel, *, width: int = 120, ascii_only: bool = False) -> Group:
-    """The whole home dashboard (without logo and menu)."""
-    parts: list[RenderableType] = [header(m, ascii_only)]
-    tg, sysp = telegram_panel(m, ascii_only), system_panel(m, ascii_only)
-    if width >= 100:
+    """The whole home dashboard (header and panels, without the menu)."""
+    parts: list[RenderableType] = [header(m, ascii_only, width), Text("")]
+    if width >= WIDE:
+        half = (width - 1) // 2
+        tg_body = _telegram_body(m, ascii_only)
+        sys_body = _system_body(m, ascii_only, half - 4)
+        height = max(_height(tg_body, half - 4), _height(sys_body, half - 4)) + 2
         row = Table.grid(expand=True, padding=(0, 1))
         row.add_column(ratio=1)
         row.add_column(ratio=1)
-        row.add_row(tg, sysp)
+        row.add_row(_panel(tg_body, _e(ascii_only, "📨 Telegram", "Telegram"), C_CYAN, height),
+                    _panel(sys_body, _e(ascii_only, "💻 System", "System"), C_VIOLET, height))
         parts.append(row)
     else:
-        parts += [tg, sysp]
-    bots = bots_panel(m, ascii_only)
+        parts += [telegram_panel(m, ascii_only), system_panel(m, ascii_only, width)]
+    bots = bots_panel(m, ascii_only, width=width)
     if bots is not None:
         parts.append(bots)
     return Group(*parts)

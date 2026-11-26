@@ -42,7 +42,8 @@ class FakeTelegram(BaseSession):
         if name == "GetManagedBotToken":
             return CHILD_TOKEN
         if name == "SendMessage":
-            self.sent.append({"chat_id": method.chat_id, "text": method.text})
+            self.sent.append({"chat_id": method.chat_id, "text": method.text,
+                              "markup": method.reply_markup})
             return aiogram.types.Message(message_id=len(self.sent), date=0, text=method.text,
                                          chat=aiogram.types.Chat(id=method.chat_id, type="private"))
         return True
@@ -107,6 +108,8 @@ async def test_managed_bot_update_is_handled_and_registers_the_bot():
     notices = [m for m in session.sent if m["chat_id"] == OWNER]
     assert len(notices) == 1 and "@NewZikoBot" in notices[0]["text"]
     assert CHILD_TOKEN not in notices[0]["text"]
+    button = notices[0]["markup"].inline_keyboard[0][0]          # the master announces + links
+    assert button.url == "https://t.me/NewZikoBot" and "/start" in notices[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -124,3 +127,12 @@ def test_master_polls_managed_bot_updates():
     from pathlib import Path
     main = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
     assert '"managed_bot"' in main.split("allowed_updates=", 1)[1].split("]", 1)[0]
+
+
+
+def test_welcome_and_connected_texts_need_no_commands_or_premium():
+    from app.handlers import tenants
+    kb = tenants._welcome_keyboard()
+    assert [b.callback_data for row in kb.inline_keyboard for b in row] == [tenants.CREATE_CB, tenants.CONNECT_CB]
+    text = tenants.connected_text("NewZikoBot")
+    assert "@NewZikoBot" in text and "Premium" not in text and "Chatbots" in text

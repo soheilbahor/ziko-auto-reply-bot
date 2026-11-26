@@ -1,3 +1,16 @@
+## [1.5.3] - 2026-11-26
+
+### Changed
+- Master bot: creating a child bot needs no command. `/start` shows "✨ ساخت ربات جدید" and
+  "🔗 اتصال ربات موجود" buttons; the master admin menu has "✨ ساخت ربات زیرمجموعه".
+  After a bot is connected, the master announces it with an "open bot" button.
+- Child bot: the first `/start` before the Business connection exists shows a 3-step
+  onboarding guide (connect, choose a reply, switch on) with a "check" button.
+- Connection guide no longer claims Telegram Premium is required (it is not, since 2026).
+- Child bot answers `/start` with exactly one message (the onboarding guide links to the menu).
+- Terminal dashboard: redesigned header, Telegram / System / Bots panels and a 6 x 2 card
+  menu on wide terminals; below 120 columns the menu is compact (one line per item).
+
 ## [1.5.2] - 2026-11-26
 
 ### Updates and backups without an extra command

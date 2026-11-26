@@ -76,6 +76,7 @@ def _btn(text: str, action: str, key: str = "") -> InlineKeyboardButton:
 def main_menu_keyboard(
     statuses: Sequence[Status], state: AppState,
     availability_row: list[InlineKeyboardButton] | None = None,
+    extra_rows: Sequence[list[InlineKeyboardButton]] = (),
 ) -> InlineKeyboardMarkup:
     """Main menu: online/offline switch (if set up), status buttons, power, tools."""
     rows: list[list[InlineKeyboardButton]] = []
@@ -105,6 +106,7 @@ def main_menu_keyboard(
         ]
     )
     rows.append([_btn("🧰 امکانات پیشرفته", Action.PANEL)])
+    rows.extend(list(r) for r in extra_rows)   # master bot only: child-bot creation
     rows.append([_btn("🔄 بروزرسانی", Action.MENU)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -142,6 +144,15 @@ def diagnosis_keyboard(ready: bool) -> InlineKeyboardMarkup:
     rows.append([_btn("🔄 بررسی دوباره", Action.DIAG)])
     rows.append([_btn("🔙 بازگشت به منو", Action.MENU)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def onboarding_keyboard() -> InlineKeyboardMarkup:
+    """First /start of a child bot that is not connected to a Business account yet."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("🔄 اتصال را انجام دادم؛ بررسی کن", Action.DIAG)],
+        [_btn("📚 انتخاب پیام آماده", "lib")],
+        [_btn("🏠 منوی اصلی", Action.MENU)],
+    ])
 
 
 def guide_keyboard() -> InlineKeyboardMarkup:

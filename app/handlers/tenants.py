@@ -37,6 +37,34 @@ class BotSetup(StatesGroup):
     waiting_for_token = State()
 
 
+CREATE_CB = "tenant_create"
+CONNECT_CB = "tenant_connect_existing"
+
+
+def _open_bot_row(username: str) -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text=f"🤖 باز کردن @{username}", url=f"https://t.me/{username}")]
+
+
+def _welcome_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✨ ساخت ربات جدید", callback_data=CREATE_CB)],
+        [InlineKeyboardButton(text="🔗 اتصال رباتی که از قبل دارم", callback_data=CONNECT_CB)],
+    ])
+
+
+def connected_text(username: str, *, token_note: str = "") -> str:
+    """Sent by the master bot right after a child bot is registered."""
+    return (
+        f"✅ <b>ربات شما وصل شد:</b> @{username}\n\n"
+        f"{token_note}"
+        "قدم بعدی، فقط دو کار:\n"
+        "۱. ربات خودتان را باز کنید و /start بزنید؛ راهنمای کامل همان‌جاست.\n"
+        "۲. در تلگرام: <b>Settings ← Telegram Business ← Chatbots</b>، ربات را انتخاب و "
+        "«Reply to messages» را روشن کنید.\n\n"
+        "توکن به‌صورت رمزنگاری‌شده ذخیره شد و هیچ‌جا نمایش داده نمی‌شود."
+    )
+
+
 def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
                          manager: TenantBotManager, master_bot_id: int,
                          admin_ids: frozenset[int]) -> Router:
@@ -53,25 +81,27 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         if tenant:
             await message.answer(
                 f"🤖 ربات اختصاصی شما فعال است: @{tenant.username}\n\n"
-                "برای مدیریت، وارد ربات خودتان شوید.\n"
-                "برای اتصال حساب Telegram Business، از تنظیمات Business تلگرام، ربات خودتان را انتخاب کنید."
+                "برای مدیریت و دیدن راهنما، ربات خودتان را باز کنید و /start بزنید.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(tenant.username)]),
             )
         else:
             await message.answer(
-                "سلام! به پلتفرم ZIKO خوش آمدید.\n\n"
-                "از بخش ساخت ربات می‌توانید یک ربات اختصاصی را مستقیماً از طریق تلگرام ایجاد کنید؛ "
-                "یا اگر از قبل ربات دارید، توکن آن را به‌صورت خصوصی متصل کنید.\n\n"
-                "برای شروع دستور /create_bot را بزنید."
+                "سلام! به <b>ZIKO</b> خوش آمدید 👋\n\n"
+                "با ZIKO یک ربات اختصاصی می‌سازید که وقتی در دسترس نیستید، "
+                "از طرف حساب تلگرام شما به پیام‌ها پاسخ می‌دهد.\n\n"
+                "یکی را انتخاب کنید:",
+                parse_mode="HTML", reply_markup=_welcome_keyboard(),
             )
 
-    @router.message(Command("create_bot"))
-    async def create_bot(message: Message, state: FSMContext) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+    async def offer_creation(message: Message, user: Any) -> None:
+        """The creation choices. Shared by /create_bot and the ✨ button."""
+        user_id = user.id if user else 0
         existing = await registry.get_tenant(user_id)
-        if existing:
+        if existing and user_id not in admin_ids:
             await message.answer(
                 f"شما قبلاً ربات @{existing.username} را ثبت کرده‌اید. "
-                "در حال حاضر هر حساب می‌تواند یک ربات فعال در ZIKO داشته باشد."
+                "در حال حاضر هر حساب می‌تواند یک ربات فعال در ZIKO داشته باشد.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(existing.username)]),
             )
             return
 
@@ -81,7 +111,7 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
             # Telegram validates the suggested username during the official creation flow.
             suffix = secrets.token_hex(3)
             suggested_username = f"Ziko{user_id % 100000}{suffix}Bot"
-            display_name = f"{(message.from_user.first_name if message.from_user else 'My')} ZIKO Bot"[:64]
+            display_name = f"{(user.first_name if user else 'My')} ZIKO Bot"[:64]
             creation_url = (
                 f"https://t.me/newbot/{me.username}/{suggested_username}"
                 f"?name={quote(display_name, safe='')}"
@@ -93,7 +123,7 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         rows.append([
             InlineKeyboardButton(
                 text="🔗 اتصال رباتی که از قبل دارم",
-                callback_data="tenant_connect_existing",
+                callback_data=CONNECT_CB,
             )
         ])
         await message.answer(
@@ -104,11 +134,22 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
 
-    @router.callback_query(F.data == "tenant_connect_existing")
+    @router.message(Command("create_bot"))
+    async def create_bot(message: Message, state: FSMContext) -> None:
+        await offer_creation(message, message.from_user)
+
+    @router.callback_query(F.data == CREATE_CB)
+    async def create_bot_button(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        if isinstance(callback.message, Message):
+            await offer_creation(callback.message, callback.from_user)
+        await callback.answer()
+
+    @router.callback_query(F.data == CONNECT_CB)
     async def connect_existing(callback: CallbackQuery, state: FSMContext) -> None:
         user_id = callback.from_user.id
         existing = await registry.get_tenant(user_id)
-        if existing:
+        if existing and user_id not in admin_ids:
             await callback.answer("شما قبلاً یک ربات ثبت کرده‌اید.", show_alert=True)
             return
         await state.set_state(BotSetup.waiting_for_token)
@@ -192,14 +233,10 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         await state.clear()
         await manager.start_tenant(tenant)
         logger.info("Tenant registered user_id=%s bot_id=%s", user_id, tenant.bot_id)
-        token_warning = "" if token_message_deleted else "\n⚠️ پیام حاوی توکن حذف نشد؛ لطفاً آن را از تاریخچه گفتگو پاک کنید.\n"
+        token_warning = "" if token_message_deleted else "⚠️ پیام حاوی توکن حذف نشد؛ لطفاً آن را از تاریخچه گفتگو پاک کنید.\n\n"
         await message.answer(
-            f"✅ ربات شما ثبت شد: @{tenant.username}\n\n"
-            f"{token_warning}"
-            "هسته ZIKO در حال راه‌اندازی ربات شماست.\n"
-            "برای پاسخ‌گویی به پیام‌های حساب شخصی‌تان، تلگرام را باز کنید: Settings → Telegram Business → Chatbots، "
-            "ربات خودتان را انتخاب و مجوز پاسخ‌دادن را فعال کنید.\n\n"
-            "سپس وارد ربات اختصاصی‌تان شوید و پاسخ خودکار را تنظیم کنید."
+            connected_text(tenant.username, token_note=token_warning), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(tenant.username)]),
         )
 
     @router.message(BotSetup.waiting_for_token)
@@ -319,11 +356,8 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         await manager.start_tenant(tenant)
         try:
             await bot.send_message(
-                owner_id,
-                f"✅ ربات شما با موفقیت ساخته و به ZIKO متصل شد: @{tenant.username}\n\n"
-                "توکن به‌صورت خودکار و رمزنگاری‌شده ذخیره شد؛ نیازی به ارسال یا کپی توکن نبود.\n"
-                "برای تنظیم پاسخ‌گویی، وارد ربات اختصاصی‌تان شوید. برای استفاده از قابلیت Telegram Business، "
-                "ربات را از Settings → Telegram Business → Chatbots متصل و مجوز پاسخ‌گویی را فعال کنید.",
+                owner_id, connected_text(tenant.username), parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(tenant.username)]),
             )
         except Exception:
             logger.warning("Could not notify managed bot owner owner_id=%s bot_id=%s", owner_id, child.id)

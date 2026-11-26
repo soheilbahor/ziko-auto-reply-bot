@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,12 +23,13 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app import panel_health
 from app.handlers.admin_panel import PanelDeps, register_panel_handlers
 from app.logging_setup import recent_problems
 from app.keyboards.admin import (
+    onboarding_keyboard,
     Action,
     AdminCB,
     back_keyboard,
@@ -196,6 +197,8 @@ def render_main_card(
 # --------------------------------------------------------------------------- #
 def create_admin_router(
     db: Database, settings: Settings, *, log_path: Path | None = None,
+    extra_menu_rows: Sequence[list[InlineKeyboardButton]] = (),
+    onboarding: bool = False,
 ) -> Router:
     """Build the admin router. Requires an FSM storage on the Dispatcher."""
     router = Router(name="admin")
@@ -243,7 +246,8 @@ def create_admin_router(
         except Exception:
             logger.warning("Availability switch unavailable", exc_info=True)
             av_row = None
-        return render_main_card(state, statuses, badge), main_menu_keyboard(statuses, state, av_row)
+        return render_main_card(state, statuses, badge), main_menu_keyboard(
+            statuses, state, av_row, extra_menu_rows)
 
     async def edit_callback_message(
         callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None
@@ -308,6 +312,16 @@ def create_admin_router(
     @router.message(Command("start", "menu"))
     async def cmd_start(message: Message, state: FSMContext) -> None:
         await state.clear()
+        if onboarding and (message.text or "").startswith("/start"):
+            try:
+                connection = await db.get_business_connection()
+            except Exception:
+                connection = None
+            if connection is None or not connection.is_enabled or not connection.can_reply:
+                # Not connected yet: one answer only, the guide (its keyboard leads to the menu).
+                await message.answer(panel_health.ONBOARDING, parse_mode=ParseMode.HTML,
+                                     reply_markup=onboarding_keyboard())
+                return
         await send_menu(message)
 
     @router.message(Command("cancel"))

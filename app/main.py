@@ -7,12 +7,12 @@ import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, BotCommandScopeChat
+from aiogram.types import BotCommand, BotCommandScopeChat, InlineKeyboardButton
 
 from app.config import load_settings
 from app.handlers.admin import create_admin_router
 from app.handlers.business import create_business_router
-from app.handlers.tenants import create_tenant_router
+from app.handlers.tenants import CREATE_CB, create_tenant_router
 from app.handlers.master import create_master_router, make_overview
 from app import platform_overview
 from app.overview_cache import OverviewCache
@@ -92,7 +92,9 @@ async def run() -> None:
             dispatcher=dp, registry=registry, manager=manager, master_bot_id=master_bot_id,
             admin_ids=settings.admin_ids,
         ))
-        dp.include_router(create_admin_router(db, settings))
+        dp.include_router(create_admin_router(db, settings, extra_menu_rows=[
+            [InlineKeyboardButton(text="✨ ساخت ربات زیرمجموعه", callback_data=CREATE_CB)],
+        ]))
         dp.include_router(create_business_router(db, settings))
         status_task = asyncio.create_task(
             status_writer(settings.database_path.parent / "run" / STATUS_FILE),

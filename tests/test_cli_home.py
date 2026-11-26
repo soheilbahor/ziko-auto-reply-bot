@@ -263,7 +263,7 @@ def test_home_screen_and_grid_menu_render_in_run_menu(tmp_path: Path, monkeypatc
                            home_fn=lambda: c.collect(service=SERVICE, version="1.5.1", update=None))
     text = out.getvalue()
     assert rc == 0
-    for needle in ("Telegram", "System", "Live Monitor", "Security", "r = refresh", "m = live monitor"):
+    for needle in ("Telegram", "System", "Live Monitor", "Security", "r Refresh", "m Live monitor", "q Quit"):
         assert needle in text, needle
 
 
@@ -325,3 +325,111 @@ def test_no_variation_selector_emoji_that_break_terminal_columns() -> None:
     import inspect
     for source in (inspect.getsource(cli_home), inspect.getsource(cli_nav)):
         assert "\ufe0f" not in source
+
+
+
+# --------------------------------------------------------------------------- 1.5.2 layout
+def _menu_text(width: int, monkeypatch, *, plain: bool = False) -> str:
+    out = StringIO()
+    con = Console(file=out, theme=cli_menu.THEME, width=width, color_system=None if plain else "truecolor",
+                  force_terminal=not plain, legacy_windows=False)
+    monkeypatch.setattr(cli_menu, "console", con)
+    con.print(cli_menu._main_grid(cli_nav.MENUS["main"]))
+    con.print(cli_menu._footer(["main"]))
+    return re.sub(r"\x1b\[[0-9;]*m", "", out.getvalue())
+
+
+@pytest.mark.parametrize("width", [40, 60, 80, 100, 124, 160, 200])
+def test_dashboard_never_overflows_the_terminal(tmp_path: Path, width: int) -> None:
+    write_run_files(tmp_path)
+    c = collector(tmp_path)
+    c.collect(service=SERVICE, version="1.5.2", update=None)
+    m = c.collect(service=SERVICE, version="1.5.2", update={"reachable": True, "available": False},
+                  host="ip-172-31-1-185", last_backup_at=NOW - 60)
+    out = StringIO()
+    Console(file=out, width=width, color_system=None, legacy_windows=False).print(
+        cli_home.render(m, width=width))
+    lines = out.getvalue().splitlines()
+    from rich.cells import cell_len
+    assert max(cell_len(line) for line in lines) <= width
+    assert any("Telegram" in line for line in lines) and any("System" in line for line in lines)
+
+
+@pytest.mark.parametrize("width", [40, 70, 100, 124, 200])
+def test_menu_grid_shows_all_twelve_items_at_every_width(monkeypatch, width: int) -> None:
+    from rich.cells import cell_len
+    text = _menu_text(width, monkeypatch)
+    for item in cli_nav.MENUS["main"].items:
+        if item.kind != cli_nav.EXIT:
+            assert item.label.split()[0] in text, (width, item.label)
+            assert item.key in text
+    assert max(cell_len(line) for line in text.splitlines()) <= width
+
+
+def test_wide_menu_is_six_columns_by_two_rows() -> None:
+    assert cli_menu._menu_columns(124) == 6 and cli_menu._menu_columns(100) == 4
+    assert cli_menu._menu_columns(80) == 3 and cli_menu._menu_columns(30) == 1
+    entries = [i for i in cli_nav.MENUS["main"].items if i.kind != cli_nav.EXIT]
+    assert len(entries) == 12 and [i.key for i in entries] == [str(n) for n in range(1, 13)]
+
+
+def test_menu_without_colour_or_unicode_has_no_emoji(monkeypatch) -> None:
+    text = _menu_text(124, monkeypatch, plain=True)
+    assert not any(ord(ch) > 0x2FFF for ch in text)
+    assert "1 Dashboard" in text and "12 Help / About" in text
+
+
+def test_long_and_missing_values_are_safe(tmp_path: Path) -> None:
+    from rich.cells import cell_len
+    m = cli_home.HomeModel(version="", host="h" * 200, service_state="inactive")
+    m.bots = [cli_home.BotLine(username="x" * 120, role="child", state="weird", ping_ms=None,
+                               note="n" * 300, note_level="bad")]
+    for width in (40, 80, 124):
+        out = StringIO()
+        Console(file=out, width=width, color_system=None).print(cli_home.render(m, width=width))
+        text = out.getvalue()
+        assert max(cell_len(line) for line in text.splitlines()) <= width
+        assert "version unknown" in text and "n/a" in text and "…" in text
+
+
+def test_main_prompt_shows_the_numbered_range(monkeypatch) -> None:
+    prompts = []
+    out = StringIO()
+    monkeypatch.setattr(cli_menu, "console", Console(file=out, theme=cli_menu.THEME, width=124))
+    monkeypatch.setattr(cli_menu.console, "input", lambda prompt="": prompts.append(str(prompt)) or "q")
+    m = cli_home.HomeModel(version="1.5.2")
+    assert cli_menu.run_menu({}, lambda: "active", version="1.5.2", home_fn=lambda: m) == 0
+    assert prompts == ["Enter a number (1-12): "]
+
+
+@pytest.mark.parametrize("key,target", [
+    ("1", "status"), ("4", "autoreply"), ("5", "business"), ("6", "update"), ("7", "doctor"),
+    ("11", "monitor_live"), ("m", "monitor_live"), ("12", "help")])
+def test_numbered_actions_still_run(key: str, target: str) -> None:
+    ran = []
+    stream = iter([key, "q"])
+    cli_nav.run_menus(cli_nav.MENUS, {target: lambda: ran.append(target)},
+                      show=lambda menu, stack: None, read_choice=lambda _m: next(stream),
+                      invalid=lambda raw: ran.append(("bad", raw)), announce=lambda item: None,
+                      pause=lambda: None, interrupted=lambda: None)
+    assert ran == [target]
+
+
+@pytest.mark.parametrize("key,submenu", [("2", "bot"), ("3", "tenants"), ("8", "backup"), ("9", "logs"),
+                                         ("10", "security")])
+def test_numbered_submenus_still_open(key: str, submenu: str) -> None:
+    shown = []
+    stream = iter([key, "0", "q"])
+    cli_nav.run_menus(cli_nav.MENUS, {}, show=lambda menu, stack: shown.append(tuple(stack)),
+                      read_choice=lambda _m: next(stream), invalid=lambda raw: None,
+                      announce=lambda item: None, pause=lambda: None, interrupted=lambda: None)
+    assert ("main", submenu) in shown
+
+
+
+@pytest.mark.parametrize("width", [44, 60, 80, 100, 119])
+def test_narrow_menu_is_one_line_per_item_without_nested_boxes(monkeypatch, width: int) -> None:
+    text = _menu_text(width, monkeypatch)
+    body = [line for line in text.splitlines() if line.startswith("│")]
+    assert len(body) <= 6                              # 12 items in at most 6 compact rows
+    assert not any("╭" in line[1:] for line in body)   # no cards inside the panel

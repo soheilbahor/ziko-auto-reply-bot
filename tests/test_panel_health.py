@@ -126,4 +126,7 @@ def test_title_display(title, shown):
 
 
 def test_connect_guide_states_telegram_limits_honestly():
-    assert "Premium" in ph.CONNECT_GUIDE and "گروه" in ph.CONNECT_GUIDE
+    assert "گروه" in ph.CONNECT_GUIDE
+    # Since 2026 connecting a bot needs no Premium; the guide must not claim otherwise.
+    assert "Premium لازم نیست" in ph.CONNECT_GUIDE and "فقط با <b>Telegram Premium</b>" not in ph.CONNECT_GUIDE
+    assert "Premium لازم نیست" in ph.ONBOARDING

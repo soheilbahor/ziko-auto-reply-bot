@@ -9,7 +9,8 @@ from collections.abc import Callable, Mapping, Sequence
 import re
 
 from rich import box
-from rich.console import Console
+from rich.align import Align
+from rich.console import Console, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -390,42 +391,91 @@ def _menu_panel(menu: cli_nav.Menu, stack: Sequence[str]) -> Panel:
                  width=_panel_width(), padding=(0, 1) if _narrow() else (0, 2))
 
 
+CARD_MIN_WIDTH = 120   # cards (6 x 2) only where they fit comfortably
+
+
+def _menu_columns(width: int) -> int:
+    return 6 if width >= CARD_MIN_WIDTH else 4 if width >= 100 else 3 if width >= 72 else 2 if width >= 44 else 1
+
+
 def _main_grid(menu: cli_nav.Menu) -> Panel:
-    """Main menu as a compact grid (4 columns on wide terminals) with optional emoji."""
+    """Main menu as cards: 6 x 2 on wide terminals, fewer columns as the terminal narrows.
+
+    Every card shows its number (the key to type), an icon when the terminal can display
+    emoji, and the label. Exit is not a card: it is the ``q`` / ``0`` shortcut below."""
+    import math
     entries = [i for i in menu.items if i.kind != cli_nav.EXIT]
-    cols = 4 if console.width >= 110 else 3 if console.width >= 84 else 2 if console.width >= 56 else 1
-    table = Table.grid(expand=True, padding=(0, 2))
-    for _ in range(cols):
-        table.add_column(no_wrap=True, overflow="ellipsis")
     fancy = not _plain()
-    cells = []
+    width = console.width
+    cols = _menu_columns(width)
+    title = ("▦ " if fancy else "") + menu.title
+    if width < CARD_MIN_WIDTH:
+        # Compact: one line per item, no nested boxes (nothing to break on small terminals).
+        table = Table.grid(expand=True, padding=(0, 2))
+        for _ in range(cols):
+            table.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
+        cells = []
+        for item in entries:
+            cell = Text.assemble((f"{item.key:>2} ", "accent"))
+            if fancy and item.icon:
+                cell.append(item.icon + " ")
+            cell.append(item.label, style="err" if item.danger else "#c0caf5")
+            cells.append(cell)
+        for start in range(0, len(cells), cols):
+            row = cells[start:start + cols]
+            table.add_row(*row, *([""] * (cols - len(row))))
+        return Panel(table, title=f"[bold #22d3ee]{title}", title_align="left", border_style="#2b3a67",
+                     box=box.ROUNDED, padding=(0, 1))
+    gap = 1
+    card_inner = max(4, (width - 4 - gap * (cols - 1)) // cols - 4)   # minus card border + padding
+    lines = max(math.ceil(len(f"{i.key} {i.label}") / card_inner) for i in entries)
+    lines = min(lines, 2)
+    height = 2 + lines + (1 if fancy else 0)
+    grid = Table.grid(expand=True, padding=(0, gap, 1, 0))
+    for _ in range(cols):
+        grid.add_column(ratio=1)
+    cards = []
     for item in entries:
-        cell = Text.assemble((f"{item.key:>2} ", "accent"))
+        body = Text(justify="center", overflow="fold")
         if fancy and item.icon:
-            cell.append(item.icon + " ")
-        cell.append(item.label, style="err" if item.danger else "#c0caf5")
-        cells.append(cell)
-    for start in range(0, len(cells), cols):
-        row = cells[start:start + cols]
-        table.add_row(*row, *([""] * (cols - len(row))))
-    return Panel(table, title=menu.title, title_align="left", border_style="#2b3a67",
-                 box=box.ROUNDED, padding=(0, 1))
+            body.append(item.icon + "\n")
+        body.append(item.key, style="accent")
+        body.append(" " + item.label, style="bold err" if item.danger else "bold #c0caf5")
+        cards.append(Panel(body, box=box.ROUNDED, border_style="#24345e", padding=(0, 1), height=height,
+                           style="on #0a1328" if fancy else ""))
+    for start in range(0, len(cards), cols):
+        row = cards[start:start + cols]
+        grid.add_row(*row, *([""] * (cols - len(row))))
+    return Panel(grid, title=f"[bold #22d3ee]{title}", title_align="left", border_style="#2b3a67",
+                 box=box.ROUNDED, padding=(1, 1, 0, 1))
 
 
-def _footer(stack: Sequence[str]) -> Text:
+def _numbered_range(menu: cli_nav.Menu) -> str:
+    keys = [int(i.key) for i in menu.items if i.key.isdigit() and i.kind != cli_nav.EXIT]
+    return f"{min(keys)}-{max(keys)}" if keys else "0"
+
+
+def _footer(stack: Sequence[str]) -> RenderableType:
+    sep = "  |  " if _plain() else "  │  "
     if len(stack) == 1:
-        return Text("Enter a number  |  r = refresh  |  m = live monitor  |  q or 0 = quit", style="muted")
+        shortcuts = Text.assemble(("r", "accent"), (" Refresh", "#7aa2ff"), (sep, "muted"),
+                                  ("m", "accent"), (" Live monitor", "#7aa2ff"), (sep, "muted"),
+                                  ("q", "accent"), (" Quit", "#7aa2ff"))
+        return Align.right(shortcuts)
     return Text("Enter a number  |  r = refresh  |  b or 0 = back  |  q = quit", style="muted")
 
 
-def _render_home(home_fn: Callable[[], object]) -> None:
+def _render_home(home_fn: Callable[[], object], version: str = "", version_error: str | None = None) -> None:
     from app import cli_home
     try:
         model = home_fn()
     except Exception as exc:  # the dashboard must never block the menu
+        print_logo(version, version_error=version_error)
         warn(f"Dashboard data unavailable ({type(exc).__name__}); the menu still works.")
         return
     console.print(cli_home.render(model, width=console.width, ascii_only=_ascii()))  # type: ignore[arg-type]
+    if version_error:
+        err_console.print(Text.assemble(("Version unavailable: ", "err"), version_error))
 
 
 def run_menu(
@@ -445,12 +495,13 @@ def run_menu(
             console.clear()
         current = version() if callable(version) else version
         version_error = version_error_fn() if version_error_fn else None
-        print_logo(current, version_error=version_error)
         if len(stack) == 1 and home_fn is not None:
-            _render_home(home_fn)
+            # The home header carries the logo, version and update state itself.
+            _render_home(home_fn, current, version_error)
             console.print(_main_grid(menu))
             console.print(_footer(stack))
             return
+        print_logo(current, version_error=version_error)
         console.print(Panel(
             Text.assemble(("Service: ", "bold"), indicator(state_fn())),
             title="Dashboard", border_style="cyan", box=box.ROUNDED,
@@ -470,7 +521,9 @@ def run_menu(
         console.print(_menu_panel(menu, stack))
         console.print(_footer(stack))
 
-    def read_choice(_menu: cli_nav.Menu) -> str:
+    def read_choice(menu: cli_nav.Menu) -> str:
+        if menu.name == "main" and home_fn is not None:
+            return console.input(Text.assemble((f"Enter a number ({_numbered_range(menu)}): ", "bold cyan")))
         return console.input(Text.assemble(("❯ ", "accent"), "Select an option: "))
 
     def invalid(raw: str) -> None:
