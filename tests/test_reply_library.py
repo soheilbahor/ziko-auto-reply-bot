@@ -124,7 +124,8 @@ def test_order_id_extraction_never_invents(text, order):
 
 def test_preview_is_realistic_and_complete():
     p = templates.preview("سلام {name}، سفارش {order_id} در {store_name}")
-    assert "{" not in p and "سارا" in p and "10482" in p
+    # Variables are shown as labels, never as an invented person (was the sample name "Sara").
+    assert "{" not in p and "‹نام مخاطب›" in p and "‹شماره سفارش›" in p and "سارا" not in p
 
 
 # --------------------------------------------------------------------------- panel views
@@ -195,3 +196,34 @@ async def test_favourites_are_isolated_per_tenant(tmp_path):
     finally:
         await a.close()
         await b_.close()
+
+
+
+def test_empty_name_leaves_no_stray_space_or_doubled_words():
+    assert templates.render("سلام {name|}! خوش آمدید", {}) == "سلام! خوش آمدید"
+    assert templates.render("سلام {name|} عزیز، خوش آمدید", {}) == "سلام عزیز، خوش آمدید"
+    assert templates.render("سلام {name|} عزیز، خوش آمدید", {"name": "Ali"}) == "سلام Ali عزیز، خوش آمدید"
+    assert "\x00" not in templates.render("{name|}{order_id|}", {})
+
+
+def test_every_library_text_reads_well_with_and_without_a_name():
+    lib = rl.load()
+    for g in lib.groups:
+        for c in g.categories:
+            for m in c.messages:
+                for ctx in ({}, {"name": "Ali", "order_id": "10482"}):
+                    out = templates.render(m.text, ctx)
+                    assert "{" not in out and "  " not in out, m.id
+                    assert not re.search(r" [!،.؟?:؛,]", out), (m.id, out)
+                    assert "عزیز عزیز" not in out and "گرامی عزیز" not in out, (m.id, out)
+                preview = templates.preview(m.text)
+                assert "سارا" not in preview and "{" not in preview, m.id
+
+
+def test_library_texts_do_not_depend_on_store_or_support_name():
+    """{store_name}/{support_name} default to the owner's name: a library text using them
+    would greet a customer with "Welcome to <owner name>"."""
+    for g in rl.load().groups:
+        for c in g.categories:
+            for m in c.messages:
+                assert "{store_name" not in m.text and "{support_name" not in m.text, m.id

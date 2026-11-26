@@ -766,6 +766,221 @@ class Database:
             await _require_status(conn, status_key)
             await _write_steps(conn, status_key, clean_steps, self._now())
 
+    # -- reply schedule and typing pause (v1.6) -----------------------------------------
+    # Additive, created on demand like the rotation tables: no schema bump, older
+    # releases ignore them, so a rollback keeps working. Defaults reproduce the behaviour
+    # of earlier releases exactly (always reply, no typing pause).
+    _SCHEDULE_DDL = (
+        "CREATE TABLE IF NOT EXISTS reply_behaviour ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "typing_delay INTEGER NOT NULL DEFAULT 0 CHECK (typing_delay BETWEEN 0 AND 10), "
+        "schedule_mode TEXT NOT NULL DEFAULT 'always' CHECK (schedule_mode IN ('always', 'outside', 'inside')), "
+        "updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS working_hours ("
+        "weekday INTEGER PRIMARY KEY CHECK (weekday BETWEEN 0 AND 6), "
+        "open_minute INTEGER CHECK (open_minute BETWEEN 0 AND 1439), "
+        "close_minute INTEGER CHECK (close_minute BETWEEN 0 AND 1440), "
+        "CHECK ((open_minute IS NULL) = (close_minute IS NULL))) WITHOUT ROWID",
+        "CREATE TABLE IF NOT EXISTS holidays ("
+        "start_date TEXT NOT NULL CHECK (length(start_date) = 10), "
+        "end_date TEXT NOT NULL CHECK (length(end_date) = 10), "
+        "PRIMARY KEY (start_date, end_date), CHECK (start_date <= end_date)) WITHOUT ROWID",
+    )
+
+    async def _ensure_schedule(self, conn: aiosqlite.Connection) -> None:
+        for ddl in self._SCHEDULE_DDL:
+            await _execute(conn, ddl)
+
+    async def get_reply_behaviour(self) -> Any:
+        """The owner's schedule and typing pause as an ``app.schedule.Behaviour``."""
+        from datetime import date as _date
+
+        from app import schedule
+
+        async with self._write() as conn:
+            await self._ensure_schedule(conn)
+            row = await _fetch_one(conn, "SELECT typing_delay, schedule_mode FROM reply_behaviour WHERE id = 1")
+            hours = await _fetch_all(conn, "SELECT weekday, open_minute, close_minute FROM working_hours")
+            days = await _fetch_all(conn, "SELECT start_date, end_date FROM holidays ORDER BY start_date")
+        return schedule.Behaviour(
+            typing_delay=int(row[0]) if row else 0,
+            mode=str(row[1]) if row else "always",
+            hours={int(h[0]): (None if h[1] is None else (int(h[1]), int(h[2]))) for h in hours},
+            holidays=tuple((_date.fromisoformat(d[0]), _date.fromisoformat(d[1])) for d in days),
+        )
+
+    async def _upsert_behaviour(self, conn: aiosqlite.Connection, column: str, value: Any) -> None:
+        assert column in {"typing_delay", "schedule_mode"}
+        await _execute(conn, "INSERT OR IGNORE INTO reply_behaviour (id, updated_at) VALUES (1, ?)", (self._now(),))
+        await _execute(conn, f"UPDATE reply_behaviour SET {column} = ?, updated_at = ? WHERE id = 1",
+                       (value, self._now()))
+
+    async def set_typing_delay(self, seconds: int) -> None:
+        from app import schedule
+
+        if not 0 <= int(seconds) <= schedule.MAX_TYPING:
+            raise InvalidReplyTextError("typing delay must be 0-10 seconds")
+        async with self._write() as conn:
+            await self._ensure_schedule(conn)
+            await self._upsert_behaviour(conn, "typing_delay", int(seconds))
+
+    async def set_schedule_mode(self, mode: str) -> None:
+        from app import schedule
+
+        if mode not in schedule.MODES:
+            raise InvalidReplyTextError("schedule mode must be always, outside or inside")
+        async with self._write() as conn:
+            await self._ensure_schedule(conn)
+            if mode != "always":
+                found = await _fetch_one(conn, "SELECT 1 FROM working_hours WHERE open_minute IS NOT NULL LIMIT 1")
+                if found is None:
+                    raise InvalidReplyTextError("set working hours first")
+            await self._upsert_behaviour(conn, "schedule_mode", mode)
+
+    async def set_working_hours(self, hours: dict[int, Any]) -> None:
+        """Replace hours for the given weekdays. A value of None makes that day a day off."""
+        cleaned: list[tuple[int, int | None, int | None]] = []
+        for weekday, value in hours.items():
+            if not 0 <= int(weekday) <= 6:
+                raise InvalidReplyTextError("weekday must be 0-6")
+            if value is None:
+                cleaned.append((int(weekday), None, None))
+                continue
+            start, end = int(value[0]), int(value[1])
+            if not (0 <= start <= 1439 and 0 <= end <= 1440 and start != end):
+                raise InvalidReplyTextError("invalid working hours")
+            cleaned.append((int(weekday), start, end))
+        async with self._write() as conn:
+            await self._ensure_schedule(conn)
+            for weekday, start, end in cleaned:
+                await _execute(conn, "INSERT INTO working_hours (weekday, open_minute, close_minute) VALUES (?, ?, ?) "
+                                     "ON CONFLICT (weekday) DO UPDATE SET open_minute = excluded.open_minute, "
+                                     "close_minute = excluded.close_minute", (weekday, start, end))
+
+    async def add_holiday(self, start: Any, end: Any, *, today: Any = None) -> None:
+        """Add an inclusive date range. Holidays that ended before ``today`` are pruned."""
+        from app import schedule
+
+        if end < start:
+            raise InvalidReplyTextError("holiday ends before it starts")
+        async with self._write() as conn:
+            await self._ensure_schedule(conn)
+            if today is not None:
+                await _execute(conn, "DELETE FROM holidays WHERE end_date < ?", (today.isoformat(),))
+            count = await _fetch_one(conn, "SELECT COUNT(*) FROM holidays")
+            if count is not None and int(count[0]) >= schedule.MAX_HOLIDAYS:
+                raise InvalidReplyTextError("too many holidays")
+            await _execute(conn, "INSERT OR IGNORE INTO holidays (start_date, end_date) VALUES (?, ?)",
+                           (start.isoformat(), end.isoformat()))
+
+    async def remove_holiday(self, start: Any, end: Any) -> bool:
+        async with self._write() as conn:
+            await self._ensure_schedule(conn)
+            before = await _fetch_one(conn, "SELECT COUNT(*) FROM holidays")
+            await _execute(conn, "DELETE FROM holidays WHERE start_date = ? AND end_date = ?",
+                           (start.isoformat(), end.isoformat()))
+            after = await _fetch_one(conn, "SELECT COUNT(*) FROM holidays")
+        return int(before[0]) != int(after[0])
+
+    # -- store / support display names (v1.6) ------------------------------------------
+    async def _ensure_brand(self, conn: aiosqlite.Connection) -> None:
+        await _execute(conn, "CREATE TABLE IF NOT EXISTS brand_names ("
+                             "id INTEGER PRIMARY KEY CHECK (id = 1), "
+                             "store_name TEXT NOT NULL DEFAULT '' CHECK (length(store_name) <= 64), "
+                             "support_name TEXT NOT NULL DEFAULT '' CHECK (length(support_name) <= 64), "
+                             "updated_at TEXT NOT NULL)")
+
+    async def get_brand_names(self) -> dict[str, str]:
+        async with self._write() as conn:
+            await self._ensure_brand(conn)
+            row = await _fetch_one(conn, "SELECT store_name, support_name FROM brand_names WHERE id = 1")
+        return {"store_name": str(row[0]) if row else "", "support_name": str(row[1]) if row else ""}
+
+    async def set_brand_name(self, field: str, value: str) -> str:
+        """Set ``store_name`` or ``support_name``; "" (or "-") clears it. Returns the stored value."""
+        if field not in {"store_name", "support_name"}:
+            raise InvalidReplyTextError("unknown name field")
+        name = " ".join((value or "").split())
+        if name in {"-", "—", "حذف"}:
+            name = ""
+        if len(name) > 64 or any(ch in name for ch in "{}<>"):
+            raise InvalidReplyTextError("name must be at most 64 characters without { } < >")
+        async with self._write() as conn:
+            await self._ensure_brand(conn)
+            await _execute(conn, "INSERT OR IGNORE INTO brand_names (id, updated_at) VALUES (1, ?)", (self._now(),))
+            await _execute(conn, f"UPDATE brand_names SET {field} = ?, updated_at = ? WHERE id = 1",
+                           (name, self._now()))
+        return name
+
+    # -- daily owner report (v1.6) ------------------------------------------------------
+    _REPORT_DDL = (
+        "CREATE TABLE IF NOT EXISTS daily_report ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)), "
+        "hour INTEGER NOT NULL DEFAULT 21 CHECK (hour BETWEEN 0 AND 23), "
+        "last_sent TEXT CHECK (last_sent IS NULL OR length(last_sent) = 10), "
+        "updated_at TEXT NOT NULL)",
+    )
+
+    async def _ensure_report(self, conn: aiosqlite.Connection) -> None:
+        for ddl in self._REPORT_DDL:
+            await _execute(conn, ddl)
+        await _execute(conn, "INSERT OR IGNORE INTO daily_report (id, updated_at) VALUES (1, ?)", (self._now(),))
+
+    async def get_report_settings(self) -> dict[str, Any]:
+        from datetime import date as _date
+
+        async with self._write() as conn:
+            await self._ensure_report(conn)
+            row = await _fetch_one(conn, "SELECT enabled, hour, last_sent FROM daily_report WHERE id = 1")
+        return {"enabled": bool(row[0]), "hour": int(row[1]),
+                "last_sent": _date.fromisoformat(row[2]) if row[2] else None}
+
+    async def set_report_settings(self, *, enabled: bool | None = None, hour: int | None = None) -> None:
+        if hour is not None and not 0 <= int(hour) <= 23:
+            raise InvalidReplyTextError("report hour must be 0-23")
+        async with self._write() as conn:
+            await self._ensure_report(conn)
+            if enabled is not None:
+                await _execute(conn, "UPDATE daily_report SET enabled = ?, updated_at = ? WHERE id = 1",
+                               (1 if enabled else 0, self._now()))
+            if hour is not None:
+                await _execute(conn, "UPDATE daily_report SET hour = ?, updated_at = ? WHERE id = 1",
+                               (int(hour), self._now()))
+
+    async def claim_report_day(self, day: Any) -> bool:
+        """Atomically mark ``day`` as reported. False if it already was."""
+        async with self._write() as conn:
+            await self._ensure_report(conn)
+            changed = await _execute(
+                conn, "UPDATE daily_report SET last_sent = ?, updated_at = ? "
+                      "WHERE id = 1 AND (last_sent IS NULL OR last_sent <> ?)",
+                (day.isoformat(), self._now(), day.isoformat()))
+        return bool(changed)
+
+    async def release_report_day(self, day: Any) -> None:
+        """Undo a claim whose send failed, so the next check retries today's report."""
+        async with self._write() as conn:
+            await self._ensure_report(conn)
+            await _execute(conn, "UPDATE daily_report SET last_sent = NULL, updated_at = ? "
+                                 "WHERE id = 1 AND last_sent = ?", (self._now(), day.isoformat()))
+
+    async def report_counts(self, since: datetime, until: datetime) -> dict[str, int]:
+        """Privacy-safe counts for ``[since, until)``: no text, names or chat ids leave here."""
+        lo, hi = _format_timestamp(since), _format_timestamp(until)
+        async with self._read() as conn:
+            inbound = await _fetch_one(
+                conn, "SELECT COUNT(*), COUNT(DISTINCT chat_id) FROM processed_messages "
+                      "WHERE created_at >= ? AND created_at < ?", (lo, hi))
+            rows = await _fetch_all(
+                conn, "SELECT state, COUNT(*) FROM reply_deliveries "
+                      "WHERE claimed_at >= ? AND claimed_at < ? GROUP BY state", (lo, hi))
+        by_state = {str(r[0]): int(r[1]) for r in rows}
+        return {"inbound": int(inbound[0]) if inbound else 0,
+                "contacts": int(inbound[1]) if inbound else 0,
+                "sent": by_state.get("sent", 0), "failed": by_state.get("failed", 0),
+                "uncertain": by_state.get("uncertain", 0)}
+
     # -- reply rotation and online/offline availability (v1.5) ------------------------
     # Additive tables created on demand (like owner_favourites): no schema bump, older
     # releases ignore them, so a rollback keeps working. Variants of a deleted status are

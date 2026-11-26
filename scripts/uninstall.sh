@@ -135,8 +135,11 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
   systemctl stop ziko.service 2>/dev/null || true
   systemctl disable ziko.service 2>/dev/null || true
+  # Scheduled backups (1.6+): the timer would otherwise call a removed ziko command daily.
+  systemctl disable --now ziko-backup.timer 2>/dev/null || true
 fi
 rm -f -- "$UNIT"
+rm -f -- "$(dirname "$UNIT")/ziko-backup.timer" "$(dirname "$UNIT")/ziko-backup.service"
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload 2>/dev/null || true
   systemctl reset-failed ziko.service 2>/dev/null || true

@@ -128,6 +128,9 @@ def scan_plaintext_tokens(paths: Iterable[Path], max_bytes: int = 4 << 20) -> li
     return [("ok", "plaintext tokens", "none found in logs/data/backups", "")]
 
 
+_CODE_SNAPSHOT = re.compile(r"^code-[0-9A-Za-z.+_-]+-\d{8}T?\d{6}Z?\.tar\.gz$")
+
+
 def check_backups(backup_dir: Path, recipient: str | None) -> list[Check]:
     out: list[Check] = []
     out.append(("ok", "backup encryption", "ZIKO_AGE_RECIPIENT configured", "") if recipient
@@ -137,10 +140,17 @@ def check_backups(backup_dir: Path, recipient: str | None) -> list[Check]:
         files = [p for p in backup_dir.glob("*") if p.is_file()]
     except OSError:
         files = []
-    plain = [p.name for p in files if p.suffix in {".sqlite3", ".gz", ".tar", ".key"}]
+    # code-<version>-<stamp>.tar.gz are the updater's rollback snapshots of /opt/ziko-assistant:
+    # program files only (no database, tokens or keys; config lives in /etc). Before 1.6 they
+    # were reported as unencrypted backups, a false FAIL. Keep them: rollback needs them.
+    snapshots = [p for p in files if _CODE_SNAPSHOT.match(p.name)]
+    plain = [p.name for p in files if p.suffix in {".sqlite3", ".gz", ".tar", ".key"} and p not in snapshots]
     if plain:
         out.append(("fail", "unencrypted backups", f"{len(plain)} unencrypted file(s): {', '.join(plain[:3])}",
-                    "delete them or re-create encrypted backups"))
+                    f"cd {backup_dir} && sudo rm -i -- " + " ".join(plain[:10])
+                    + " (then: sudo ziko backup)"))
+    if snapshots:
+        out.append(("ok", "code snapshots", f"{len(snapshots)} updater rollback snapshot(s), program files only", ""))
     enc = sorted((p for p in files if p.suffix == ".age"), key=lambda p: p.stat().st_mtime)
     if not enc:
         out.append(("warn", "latest backup", "no encrypted backup found", "sudo ziko backup"))

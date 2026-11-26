@@ -53,6 +53,17 @@ _ANY_BRACE_TOKEN = re.compile(r"\{[^{}\n]{0,80}\}")
 _ORDER_ID = re.compile(r"(?<![\w-])#?(\d{4,10})(?![\w-])")
 
 
+_EMPTY = "\x00"   # marks an empty value during render; never left in the output
+
+# Owner-facing preview: each variable is shown as a visible label, not as an invented
+# person. ‹ › never appear in real messages.
+PREVIEW_LABELS: dict[str, str] = {
+    "name": "‹نام مخاطب›", "customer_name": "‹نام مخاطب›", "time": "‹ساعت›", "date": "‹تاریخ›",
+    "owner": "‹نام شما›", "store_name": "‹نام فروشگاه›", "support_name": "‹نام پشتیبان›",
+    "order_id": "‹شماره سفارش›",
+}
+
+
 class TemplateError(ValueError):
     """Template rejected at save time. Message is English (logs); panel shows ``persian``."""
 
@@ -111,10 +122,12 @@ def render(template: str, context: Mapping[str, object]) -> str:
         if value:
             return value
         if inline_fallback is not None:
-            return clean_value(inline_fallback)
-        return FALLBACKS.get(key, "")
+            return clean_value(inline_fallback) or _EMPTY
+        return FALLBACKS.get(key, "") or _EMPTY
 
     text = _TOKEN.sub(fill, template)
+    # An empty value leaves no stray space before punctuation: "سلام {name|}!" -> "سلام!".
+    text = re.sub(r"[ \t]*" + _EMPTY + r"(?=[!،.؟?:؛,])", "", text).replace(_EMPTY, "")
     # Defence in depth: anything still shaped like a placeholder never reaches a customer.
     text = _ANY_BRACE_TOKEN.sub("", text)
     # Tidy spacing left by empty values, without touching line structure.
@@ -124,8 +137,8 @@ def render(template: str, context: Mapping[str, object]) -> str:
 
 
 def preview(template: str, sample: Mapping[str, object] | None = None) -> str:
-    """Owner-facing preview with realistic sample values."""
-    demo = {"name": "سارا", "time": "14:30", "date": "1405/09/04", "owner": "علی",
-            "store_name": "فروشگاه نمونه", "support_name": "پشتیبانی", "order_id": "10482"}
+    """Owner-facing preview. Variables appear as labels such as ‹نام مخاطب›, so nobody
+    mistakes an example name for the text that is sent; ``sample`` overrides labels."""
+    demo: dict[str, object] = dict(PREVIEW_LABELS)
     demo.update(sample or {})
     return render(template, demo)

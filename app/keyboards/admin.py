@@ -43,6 +43,8 @@ class Action:
     OWNER_TZ = "owtz"
     OWNER_LANG = "owlang"
     OWNER_NAME = "ownname"
+    STORE_NAME = "ownstore"
+    SUPPORT_NAME = "ownsupp"
     EXC = "exc"
     EXC_ADD = "excadd"
     EXC_DEL = "excdel"
@@ -98,7 +100,9 @@ def main_menu_keyboard(
         rows.append([_btn("▶️ فعال‌سازی پاسخ خودکار", Action.ENABLE)])
 
     rows.append([_btn("✏️ ویرایش متن پاسخ‌ها", Action.EDIT_MENU)])
-    rows.append([_btn("📚 پیام‌های آماده", "lib"), _btn("🩺 عیب‌یابی", Action.DIAG)])
+    rows.append([_btn("📚 پیام‌های آماده", "lib"), _btn("🎭 استیکر پاسخ", "stk")])
+    rows.append([_btn("⏰ زمان‌بندی و تایپ", "sch"), _btn("📊 گزارش روزانه", "rep")])
+    rows.append([_btn("🩺 عیب‌یابی", Action.DIAG)])
     rows.append(
         [
             _btn("🔌 وضعیت اتصال", Action.CONNECTION),
@@ -273,6 +277,7 @@ def owner_keyboard() -> InlineKeyboardMarkup:
             [_btn("🕒 منطقه زمانی", Action.OWNER_TZ)],
             [_btn("🗣 تغییر زبان (فارسی / English)", Action.OWNER_LANG)],
             [_btn("👤 نام مالک", Action.OWNER_NAME)],
+            [_btn("🏪 نام فروشگاه", Action.STORE_NAME), _btn("🎧 نام پشتیبانی", Action.SUPPORT_NAME)],
             [_btn("🔙 بازگشت", Action.PANEL)],
         ]
     )

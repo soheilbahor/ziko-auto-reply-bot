@@ -1211,7 +1211,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("start", help="Start the service")
     sub.add_parser("stop", help="Stop the service")
     sub.add_parser("restart", help="Restart the service")
-    logs = sub.add_parser("logs", help="View logs (tokens are redacted)")
+    logs = sub.add_parser("logs", help="View logs (tokens are redacted); 'ziko logs errors' groups problems",
+                          description="Without VIEW: recent journal lines. 'errors': warnings and errors "
+                                      "grouped by cause, with a fix for each (exit 0 none, 1 warnings, 2 errors).")
+    logs.add_argument("view", nargs="?", choices=["errors"], help="errors: grouped error summary")
+    logs.add_argument("--since", default="24h", help="With 'errors': time window, e.g. 30m, 24h, 7d (default 24h)")
+    logs.add_argument("--json", action="store_true", help="With 'errors': machine-readable output")
     logs.add_argument("-n", "--lines", type=int, default=100, help="Number of lines (default: 100)")
     logs.add_argument("-f", "--follow", action="store_true", help="Follow live logs")
     logs.add_argument("--master", action="store_true", help="Read master.log instead of the journal")
@@ -1259,7 +1264,17 @@ def _build_parser() -> argparse.ArgumentParser:
     bi.add_argument("--probe", action="store_true",
                     help="Also decrypt the token in memory and call getMe (token is never shown)")
     bi.add_argument("--json", action="store_true", help="Machine-readable output")
-    sub.add_parser("backup", help="Back up the database (scripts/backup.sh)")
+    bk = sub.add_parser("backup", help="Back up now; 'schedule on|off|status' for daily backups; 'prune'",
+                        description="Without ACTION: create an encrypted backup now. "
+                                    "'schedule on|off|status': daily backup via a systemd timer. "
+                                    "'prune': delete scheduled backups older than --keep-days "
+                                    "(the newest 3 of each kind are always kept).")
+    bk.add_argument("action", nargs="?", choices=["schedule", "prune"])
+    bk.add_argument("state", nargs="?", choices=["on", "off", "status"], help="With 'schedule'")
+    bk.add_argument("--time", default="03:30", help="With 'schedule on': HH:MM server time (default 03:30)")
+    bk.add_argument("--keep-days", type=int, default=14, help="Retention in days (default 14)")
+    bk.add_argument("--dry-run", action="store_true", help="With 'prune': only list what would be deleted")
+    bk.add_argument("-y", "--yes", action="store_true", help="With 'prune': do not ask")
     res = sub.add_parser("restore", help="Restore from a backup file (scripts/restore.sh)")
     res.add_argument("file", metavar="FILE", help="Path to a .sqlite3 backup or full-platform .tar.gz archive")
     res.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
@@ -1334,6 +1349,11 @@ def _interactive() -> int:
         return 2
 
 
+    def logs_errors() -> int:
+        from app import error_center
+        values, _problem = _read_env()
+        return error_center.cmd_errors(log_dir=_db_path(values or {}).parent / "logs")
+
     def logs_custom() -> int:
         raw = ui.ask("Number of lines (1-5000, empty = cancel)")
         if not raw:
@@ -1406,7 +1426,7 @@ def _interactive() -> int:
         "security_move": security_move, "monitor_live": monitor_live,
         "status": cmd_status, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
         "logs_tail": lambda: cmd_logs(50), "logs_follow": lambda: cmd_logs(50, follow=True),
-        "logs_custom": logs_custom, "backup": cmd_backup, "restore": restore,
+        "logs_custom": logs_custom, "logs_errors": logs_errors, "backup": cmd_backup, "restore": restore,
         "update": update_center, "config": config, "doctor": cmd_doctor,
         "help": cmd_help, "bots": cmd_bots_list, "uninstall": cmd_uninstall,
         "tenants": lambda: ui.show_guide("tenants"),
@@ -1436,6 +1456,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.print_help()
             return 0
         c = args.command
+        if c == "logs" and args.view == "errors":
+            from app import error_center
+            values, _problem = _read_env()
+            return error_center.cmd_errors(log_dir=_db_path(values or {}).parent / "logs",
+                                           since=args.since, bot=args.bot, as_json=args.json)
         if c == "logs":
             if args.master or args.bot is not None or args.level:
                 return cmd_file_logs(
@@ -1514,6 +1539,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for a, m, d in alerts:
                     print(f"{a:<5} {m:<26} {d}")
             return rc
+        if c == "backup" and args.action:
+            from app import backup_schedule
+            if args.action == "prune":
+                root = Path(os.environ.get("ZIKO_BACKUP_DIR", "/var/backups/ziko-assistant"))
+                return backup_schedule.cmd_prune(backup_dir=root, keep_days=args.keep_days,
+                                                 dry_run=args.dry_run, yes=args.yes,
+                                                 confirm=_ui().confirm)
+            return backup_schedule.cmd_schedule(args.state or "status", at=args.time,
+                                                keep_days=args.keep_days, run=_capture)
         return {"status": cmd_status, "start": cmd_start, "stop": cmd_stop,
                 "restart": cmd_restart, "backup": cmd_backup}[c]()
     except KeyboardInterrupt:

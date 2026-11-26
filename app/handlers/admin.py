@@ -241,6 +241,24 @@ def create_admin_router(
         except Exception:
             return None
 
+    async def schedule_now() -> tuple[bool, str] | None:
+        """(reply allowed now?, Persian line) from the owner's schedule; None when unused."""
+        getter = getattr(db, "get_reply_behaviour", None)
+        if getter is None:
+            return None
+        try:
+            from app import schedule
+            behaviour = await getter()
+            if behaviour.mode == "always":
+                return None
+            owner = await db.get_owner_settings()
+            now = schedule.now_utc()
+            return (schedule.reply_allowed(behaviour, now, owner.timezone)[0],
+                    schedule.explain(behaviour, now, owner.timezone))
+        except Exception:
+            logger.warning("Schedule unavailable for diagnosis", exc_info=True)
+            return None
+
     async def diagnose(bot: Any = None) -> panel_health.Diagnosis:
         """Evaluate every gate the reply engine applies. Read-only, a few small queries."""
         app_state = await db.get_app_state()
@@ -261,6 +279,7 @@ def create_admin_router(
             connection=await db.get_business_connection(), app_state=app_state, status=status,
             owner=await db.get_owner_settings(), stats=stats, problems=problems,
             exceptions_count=exceptions_count, business_mode=await business_mode(bot),
+            schedule_now=await schedule_now(),
         )
 
     async def build_menu(bot: Any = None) -> tuple[str, InlineKeyboardMarkup]:
@@ -583,6 +602,21 @@ def create_admin_router(
             log_action=log_action,
         ),
     )
+
+    # Daily owner report. Same AdminFilter; before the fallbacks.
+    from app.handlers.report_panel import register_report_handlers
+    register_report_handlers(router, PanelDeps(db=db, edit=edit_callback_message,
+                                               answer=_safe_callback_answer, log_action=log_action))
+
+    # Working hours, holidays and the typing pause. Same AdminFilter; before the fallbacks.
+    from app.handlers.schedule_panel import register_schedule_handlers
+    register_schedule_handlers(router, PanelDeps(db=db, edit=edit_callback_message,
+                                                 answer=_safe_callback_answer, log_action=log_action))
+
+    # Sticker step for the active reply. Same AdminFilter; must precede the fallbacks.
+    from app.handlers.sticker_panel import register_sticker_handlers
+    register_sticker_handlers(router, PanelDeps(db=db, edit=edit_callback_message,
+                                                answer=_safe_callback_answer, log_action=log_action))
 
     # Ready-made reply library (Persian). Same AdminFilter; must precede the fallbacks.
     from app.handlers.library import register_library_handlers

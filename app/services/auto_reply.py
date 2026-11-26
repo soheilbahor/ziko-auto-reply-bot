@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram.types import ReplyParameters
 
-from app import templates
+from app import schedule, templates
 from app.logging_setup import set_stage
 from app.models import DeliveryOutcome, OwnerSettings, ReplyStep
 
@@ -55,6 +55,39 @@ class BusinessMessageEngine:
         self.db, self.sender, self.settings = db, sender, settings
         self.step_delay = DEFAULT_STEP_DELAY
         self._connection_lock = asyncio.Lock()
+        self._sleep = asyncio.sleep  # injectable: tests run the typing pause instantly
+
+    async def _behaviour(self) -> Any:
+        """The owner's schedule/typing settings, or None (older storage or a read error).
+
+        None means "behave like earlier releases": always reply, no typing pause."""
+        getter = getattr(self.db, "get_reply_behaviour", None)
+        if getter is None:
+            return None
+        try:
+            return await getter()
+        except Exception:
+            logger.warning("Reply schedule unavailable; replying as before", exc_info=True)
+            return None
+
+    async def _typing(self, *, chat_id: int, connection_id: str, seconds: float, action: str) -> None:
+        """Show "typing…" (or "choosing a sticker…") for ``seconds``, as the owner's account.
+
+        Best effort: a refused chat action never stops the reply. Telegram clears the
+        indicator after about 5 s, so it is renewed for longer pauses."""
+        remaining = float(seconds)
+        while remaining > 0:
+            send_action = getattr(self.sender, "send_chat_action", None)
+            if send_action is not None:
+                try:
+                    await send_action(chat_id=chat_id, action=action, business_connection_id=connection_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug("Chat action not shown %s", _error_detail(exc))
+            step = min(remaining, schedule.TYPING_REFRESH)
+            await self._sleep(step)
+            remaining -= step
 
     async def handle_business_connection(self, connection: Any) -> None:
         """Persist only a connection whose owner is explicitly allow-listed.
@@ -199,11 +232,37 @@ class BusinessMessageEngine:
             last = await self.db.last_reply_sent_at(connection_id, int(chat.id))
             if last is not None and (now - last).total_seconds() < status.min_interval_seconds:
                 return ReplyOutcome.IGNORED
+        behaviour = await self._behaviour()
+        if behaviour is not None:
+            allowed, reason = schedule.reply_allowed(behaviour, now, owner.timezone)
+            if not allowed:
+                logger.debug("Auto-reply skipped by schedule reason=%s", reason)
+                return ReplyOutcome.IGNORED
+        typing_delay = int(getattr(behaviour, "typing_delay", 0) or 0)
 
         set_stage("REPLY_CLAIM")
         token = await self.db.claim_reply(connection_id, int(chat.id), state.session_id)
         if token is None:
             return ReplyOutcome.ALREADY_REPLIED
+
+        if typing_delay:
+            # Before RECHECK: if the owner switches auto-reply off during the pause, the
+            # claim is released and nothing is sent. Nothing was sent yet, so a
+            # cancellation here may safely release the claim too.
+            set_stage("TYPING")
+            first = (await self.db.list_reply_steps(status.key) or [ReplyStep(1, "text", status.reply_text)])[0]
+            try:
+                await self._typing(
+                    chat_id=int(chat.id), connection_id=connection_id,
+                    seconds=schedule.typing_seconds(typing_delay, len(first.content)),
+                    action="choose_sticker" if first.kind == "sticker" else "typing",
+                )
+            except asyncio.CancelledError:
+                await asyncio.shield(self.db.release_reply(
+                    connection_id=connection_id, chat_id=int(chat.id),
+                    session_id=state.session_id, claim_token=token,
+                ))
+                raise
 
         set_stage("RECHECK")
         # Re-check state and connection after claim. If sending has not begun, release.
@@ -233,13 +292,26 @@ class BusinessMessageEngine:
                 variant = None
             if variant:
                 steps = [ReplyStep(1, "text", variant)]
-        context = _template_context(message, owner, now)
+        brand = None
+        names = getattr(self.db, "get_brand_names", None)
+        if names is not None:
+            try:
+                brand = await names()
+            except Exception:
+                logger.warning("Store names unavailable; using the owner name", exc_info=True)
+        context = _template_context(message, owner, now, brand)
         reply_to = int(message.message_id) if status.reply_mode == "reply" else None
         delivered = 0
         last_message_id: int | None = None
         try:
             for index, step in enumerate(steps):
-                if index:
+                if index and typing_delay:
+                    await self._typing(
+                        chat_id=int(chat.id), connection_id=connection_id,
+                        seconds=max(self.step_delay, schedule.typing_seconds(typing_delay, len(step.content)) / 2),
+                        action="choose_sticker" if step.kind == "sticker" else "typing",
+                    )
+                elif index:
                     await asyncio.sleep(self.step_delay)
                 sent = await self._send_step(
                     step, chat_id=int(chat.id), connection_id=connection_id,
@@ -288,7 +360,8 @@ def render_template(content: str, context: dict[str, str]) -> str:
     return templates.render(content, context)
 
 
-def _template_context(message: Any, owner: OwnerSettings, now_utc: datetime) -> dict[str, str]:
+def _template_context(message: Any, owner: OwnerSettings, now_utc: datetime,
+                      brand: dict[str, str] | None = None) -> dict[str, str]:
     local = now_utc.astimezone(ZoneInfo(owner.timezone))
     first_name = str(getattr(getattr(message, "from_user", None), "first_name", "") or "").strip()
     # The customer's text is used ONLY to spot an order number they typed; it is never
@@ -300,8 +373,10 @@ def _template_context(message: Any, owner: OwnerSettings, now_utc: datetime) -> 
         "time": local.strftime("%H:%M"),
         "date": local.strftime("%Y-%m-%d"),
         "owner": owner.owner_name,
-        "store_name": owner.owner_name,
-        "support_name": owner.owner_name,
+        # v1.6: own settings; empty falls back to the owner name (the 1.5 behaviour), and
+        # an empty owner name falls back to templates' Persian default ("فروشگاه ما").
+        "store_name": (brand or {}).get("store_name") or owner.owner_name,
+        "support_name": (brand or {}).get("support_name") or owner.owner_name,
         "order_id": templates.extract_order_id(text if isinstance(text, str) else None),
     }
 

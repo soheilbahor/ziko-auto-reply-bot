@@ -92,6 +92,8 @@ MENUS: Mapping[str, Menu] = {
         Item("1", "Last 50 lines", "Show recent log lines", ACTION, "logs_tail"),
         Item("2", "Follow live", "Stream logs (Ctrl+C to stop)", ACTION, "logs_follow"),
         Item("3", "Choose line count", "Show a custom number of lines", ACTION, "logs_custom"),
+        Item("4", "Error summary", "Warnings and errors of the last 24 h, grouped, with fixes", ACTION,
+             "logs_errors"),
         _back(),
     ), parent="main"),
 }

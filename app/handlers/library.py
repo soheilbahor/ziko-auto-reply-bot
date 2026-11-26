@@ -115,7 +115,8 @@ def category_view(lib: rl.Library, category_id: str, favourites: set[str],
     if nav:
         rows.append(nav)
     rows.append([_btn("🔙 بازگشت", LIB_GROUP, c.group_id)])
-    lines.append("<i>پیش‌نمایش با نمونهٔ «سارا»؛ برای مشتری، نام خودش نوشته می‌شود.</i>")
+    lines.append("<i>‹نام مخاطب› در پیام واقعی با نام خود هر مخاطب جایگزین می‌شود؛ "
+                 "اگر نامش معلوم نباشد، حذف می‌شود.</i>")
     return _fit("\n".join(lines)), InlineKeyboardMarkup(inline_keyboard=rows)
 
 

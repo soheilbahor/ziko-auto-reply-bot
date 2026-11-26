@@ -63,6 +63,8 @@ P_STEPS = "steps"
 P_HOURS = "hours"
 P_OWNER_TZ = "owner_tz"
 P_OWNER_NAME = "owner_name"
+P_STORE_NAME = "store_name"
+P_SUPPORT_NAME = "support_name"
 P_EXC_ADD = "exc_add"
 
 _HOURS_RE = re.compile(r"^\s*(\d{1,2})\s*[-–]\s*(\d{1,2})\s*$")
@@ -161,6 +163,16 @@ async def _render_owner(db: Database) -> tuple[str, InlineKeyboardMarkup]:
         f"زبان: {lang}\n"
         f"نام مالک: {_esc(owner.owner_name) or '—'}"
     )
+    getter = getattr(db, "get_brand_names", None)
+    if getter is not None:
+        brand = await getter()
+        fallback = _esc(owner.owner_name) or "فروشگاه ما"
+        text += (
+            f"\nنام فروشگاه: {_esc(brand['store_name']) or f'— (فعلاً: {fallback})'}"
+            f"\nنام پشتیبانی: {_esc(brand['support_name']) or f'— (فعلاً: {fallback})'}\n\n"
+            "<i>در متن پاسخ‌ها {store_name} با نام فروشگاه و {support_name} با نام پشتیبانی "
+            "پر می‌شود. مثال: «سلام، از {store_name} پیام می‌دهم».</i>"
+        )
     return text, owner_keyboard()
 
 
@@ -448,6 +460,18 @@ def register_panel_handlers(router: Router, deps: PanelDeps) -> None:
     async def cb_owner_name(callback: CallbackQuery, state: FSMContext) -> None:
         await begin_input(callback, state, P_OWNER_NAME, "👤 نام مالک را بفرستید (حداکثر ۶۴ نویسه).")
 
+    @router.callback_query(AdminCB.filter(F.action == Action.STORE_NAME))
+    async def cb_store_name(callback: CallbackQuery, state: FSMContext) -> None:
+        await begin_input(callback, state, P_STORE_NAME,
+                          "🏪 نام فروشگاه یا کسب‌وکار را بفرستید (حداکثر ۶۴ نویسه).\n"
+                          "برای حذف، علامت <code>-</code> را بفرستید.")
+
+    @router.callback_query(AdminCB.filter(F.action == Action.SUPPORT_NAME))
+    async def cb_support_name(callback: CallbackQuery, state: FSMContext) -> None:
+        await begin_input(callback, state, P_SUPPORT_NAME,
+                          "🎧 نام پشتیبانی را بفرستید، مثلاً «تیم پشتیبانی آلفا» یا «مریم از پشتیبانی».\n"
+                          "برای حذف، علامت <code>-</code> را بفرستید.")
+
     @router.callback_query(AdminCB.filter(F.action == Action.OWNER_LANG))
     async def cb_owner_lang(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
@@ -645,6 +669,14 @@ def register_panel_handlers(router: Router, deps: PanelDeps) -> None:
             deps.log_action(message.from_user.id, "owner_settings", "")
             owner_text, markup = await _render_owner(db)
             await message.answer(owner_text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            return
+
+        if purpose in (P_STORE_NAME, P_SUPPORT_NAME):
+            await db.set_brand_name(purpose, text)        # InvalidReplyTextError -> shared handler
+            await state.clear()
+            deps.log_action(message.from_user.id, purpose, "")
+            owner_text, markup = await _render_owner(db)
+            await message.answer("✅ ذخیره شد.\n\n" + owner_text, parse_mode=ParseMode.HTML, reply_markup=markup)
             return
 
         if purpose == P_EXC_ADD:

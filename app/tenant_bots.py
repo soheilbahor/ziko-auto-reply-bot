@@ -16,6 +16,7 @@ from aiogram.methods import GetUpdates
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BufferedInputFile, InputProfilePhotoStatic
 
+from app import daily_report
 from app.bot_lifecycle import (
     BotStatus, PollingWatchdog, State, TokenMismatch, WatchdogTripped, classify,
 )
@@ -396,6 +397,10 @@ class TenantBotManager:
                 close_bot_session=False,
                 handle_signals=False,
             ), name=f"ziko-poll-{tenant.bot_id}")
+            # Daily owner report (off unless the owner enabled it). Lives exactly as long as
+            # this poller, so a restarted or stopped bot never leaves a second reporter.
+            reporter = asyncio.create_task(daily_report.report_loop(db, bot, tenant.user_id),
+                                           name=f"ziko-report-{tenant.bot_id}")
             tripped = asyncio.get_running_loop().create_future()
             watchdog.on_trip(lambda trip: tripped.done() or tripped.set_result(trip))
             try:
@@ -417,6 +422,8 @@ class TenantBotManager:
                 # behind would keep polling the same token and cause 409 conflicts.
                 if not tripped.done():
                     tripped.cancel()
+                reporter.cancel()
+                await asyncio.gather(reporter, return_exceptions=True)
                 if not polling.done():
                     try:
                         await dp.stop_polling()

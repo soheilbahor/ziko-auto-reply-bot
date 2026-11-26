@@ -125,7 +125,7 @@ def onboarding_text(business_mode: bool | None, username: str | None = None) -> 
 def diagnose(*, connection: Any, app_state: Any, status: Any, owner: Any,
              stats: dict[str, int] | None = None, problems: list[str] | None = None,
              exceptions_count: int = 0, now: datetime | None = None,
-             business_mode: bool | None = None) -> Diagnosis:
+             business_mode: bool | None = None, schedule_now: tuple[bool, str] | None = None) -> Diagnosis:
     """All arguments are the objects the storage layer already returns (or None).
 
     ``business_mode``: the bot's ``can_connect_to_business`` from getMe; None = unknown."""
@@ -193,6 +193,14 @@ def diagnose(*, connection: Any, app_state: Any, status: Any, owner: Any,
                                "با انتخاب دوبارهٔ وضعیت، نشست جدید شروع می‌شود"))
     if exceptions_count:
         f.append(Finding(INFO, f"{exceptions_count} مخاطب در فهرست استثنا هستند و پاسخ نمی‌گیرند"))
+    # Schedule (v1.6): ``schedule_now`` = (reply allowed now?, Persian explanation).
+    if schedule_now is not None:
+        allowed, line = schedule_now
+        if allowed:
+            f.append(Finding(INFO, line.lstrip("✅ ").rstrip("."), code="schedule_open"))
+        else:
+            f.append(Finding(WARN, line.lstrip("⏸ ").rstrip("."), code="schedule_closed", fix=
+                             "این طبق زمان‌بندی شماست. برای تغییر، «⏰ زمان‌بندی و تایپ» را بزنید."))
 
     # Delivery health from counters (privacy-safe aggregates only).
     if stats:

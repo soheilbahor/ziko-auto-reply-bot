@@ -1,3 +1,93 @@
+## [1.6.0] - 2026-11-26
+
+### Added
+- **Typing pause.** Before an auto-reply, the owner's chat shows "typing…" (or "choosing a
+  sticker…") for 2, 4 or 7 seconds, slightly longer for long texts (max 10 s). Renewed every
+  4.5 s so the indicator never disappears. Off by default. A refused chat action never stops
+  the reply.
+- **Weekly working hours and holidays.** Per weekday (Saturday-Friday) hours such as `9-17`,
+  `9:30-18`, overnight `22-2`, `تعطیل` or `24`; one-tap preset Sat-Wed 9-17, Thu 9-13, Fri off.
+  Holidays as Solar Hijri dates or ranges (`۱۴۰۵/۱۲/۲۵ تا ۱۴۰۶/۰۱/۱۳`), max 30, past ones pruned.
+  Reply mode: always (default), only outside working hours, or only during working hours.
+  Uses the owner's timezone.
+- Owner panel: main-menu button "⏰ زمان‌بندی و تایپ" with a live line saying whether a reply
+  goes out right now and why. `/diagnose` reports `schedule_closed` / `schedule_open`.
+- `app/schedule.py` (pure logic + Jalali calendar), `app/handlers/schedule_panel.py`,
+  `tests/test_schedule.py`, `tests/test_schedule_panel.py`.
+
+- **Daily owner report.** Main-menu button "📊 گزارش روزانه": on/off (off by default), send
+  hour 9/13/18/21/23 (owner's timezone), preview now. One Persian message per day with the
+  last 24 hours: incoming messages, contacts, replies sent, failed/uncertain, trend vs the
+  previous 24 hours, and auto-reply on/off. Counts only; no message text, names or chat ids.
+  At most once per day (day claimed before sending; failed send released and retried; owner
+  who blocked the bot is not retried that day). Runs inside each child poller and stops with it.
+  `app/daily_report.py`, `app/handlers/report_panel.py`, table `daily_report` (on demand),
+  `tests/test_daily_report.py`.
+- **Store and support names.** Owner settings (👤 تنظیمات مالک) gain "🏪 نام فروشگاه" and
+  "🎧 نام پشتیبانی". `{store_name}` and `{support_name}` in replies now use them; when empty
+  they fall back to the owner name (the 1.5 behaviour), then to «فروشگاه ما» / «تیم پشتیبانی».
+  Max 64 characters, no `{ } < >`; `-` clears. Table `brand_names` (on demand).
+  `tests/test_brand_names.py`.
+
+### Maintenance
+- **`ziko logs errors [--since 24h] [--bot ID] [--json]`**: warnings and errors from master.log
+  and every child-bot log, grouped by cause (token rejected, polling conflict, flood wait,
+  Business Mode off, network, database locked, disk full, permissions, ...), each with count,
+  bots, last seen, a redacted sample and a concrete fix. Exit 0 none, 1 warnings, 2 errors.
+  Also in the interactive menu: Logs > Error summary. `app/error_center.py`.
+- **Scheduled backups**: `sudo ziko backup schedule on [--time 03:30] [--keep-days 14]`,
+  `off`, `status`. A systemd timer runs the existing encrypted `ziko backup` daily
+  (Persistent: a missed run happens at next boot), then `ziko backup prune`. Off by default.
+  `ziko backup prune [--keep-days N] [--dry-run]` deletes only scheduled backup files older
+  than N days and always keeps the newest 3 of each kind; pre-update backups and code
+  snapshots are never touched. Rollback-safe: the prune step is optional in the unit.
+  uninstall.sh removes the timer. `app/backup_schedule.py`.
+
+### Fixed
+- **Sticker replaced the text** (found on staging): a reply stored only as text has no step
+  rows (the engine falls back to its text). "🎭 استیکر پاسخ" then stored the sticker alone,
+  so the customer got only the sticker, and "remove stickers" refused to work. The sticker
+  panel now starts from what is really sent (the text), appends the sticker, and removal
+  restores the text. Regression test added; two tests that passed only because of the bug
+  now check what the customer receives.
+- **Lost platform alerts**: an alert was marked as sent before delivery, so if it reached no
+  admin (network down, admin never started the bot) it was never sent again. Now the
+  decision is undone and the alert is retried at the next check; a delivery to at least one
+  admin counts as sent.
+- **Security audit false FAIL**: the updater's `code-<version>-<stamp>.tar.gz` rollback
+  snapshots (program files only) were reported as unencrypted backups. They are now listed
+  as "code snapshots: ok". Real plaintext backups still FAIL, and the fix line now prints the
+  exact `rm -i` command.
+
+### Safety
+- Defaults reproduce 1.5.x exactly (always reply, no pause). Settings live in new tables
+  created on first use (`reply_behaviour`, `working_hours`, `holidays`); no schema bump, so
+  rolling back to 1.5.x keeps working (the tables are ignored).
+- Schedule is checked before any delivery claim: a skipped message leaves no delivery row.
+- The pause runs after the claim and before the re-check: if the owner switches auto-reply
+  off during the pause, the claim is released and nothing is sent. Cancellation during the
+  pause releases the claim (nothing was sent yet), so at-most-once delivery is unchanged.
+
+## [1.5.6] - 2026-11-26
+
+### Reply library
+- Previews no longer show an invented name ("Sara"): variables appear as labels such as
+  ‹نام مخاطب› and ‹شماره سفارش›, with a note that the real name is filled in per contact.
+- Texts rewritten to be practical: they say exactly what the customer should send
+  (numbered checklists for orders, payments, VPN problems) and no longer use
+  {store_name}/{support_name}, which defaulted to the owner's own name.
+- Fixed "دوست عزیز عزیز" / "مشتری گرامی عزیز" when a contact has no name: library texts
+  use {name|} and an empty value leaves no stray space before punctuation.
+- New categories: shipping (ارسال و تحویل) and price inquiry (استعلام قیمت); 73 messages.
+  Your original example texts are unchanged; message ids are stable (favourites keep working).
+
+### Added
+- Child bot main menu: "🎭 استیکر پاسخ". Send a sticker and it is appended to the active
+  reply (sent after its text, through the Business connection, like other sticker steps).
+  "🗑" removes the sticker steps again; text steps are never changed. Max 10 steps.
+- Reactions on the contact's message are not possible: Telegram's setMessageReaction has
+  no business_connection_id, so a Business bot cannot react on the owner's behalf.
+
 ## [1.5.5] - 2026-11-26
 
 ### Changed

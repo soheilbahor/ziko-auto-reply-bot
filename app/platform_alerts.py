@@ -101,6 +101,8 @@ class AlertEngine:
     _queue_announced: bool = False
     _cycles: int = 0
     muted_until: float = 0.0
+    # Undo record of the last message returned by step(); see undo_last().
+    _last: dict[str, Any] | None = None
 
     def _is_alert(self, state: str) -> bool:
         return state in self.config.states
@@ -168,6 +170,12 @@ class AlertEngine:
             if capacity_line:
                 self._queue_announced = not self._queue_announced
             return None
+        self._last = {
+            "problems": [(tr, tr.last_alert_at) for _, tr in new_problems],
+            "recovered": [tr for _, tr in recovered],
+            "queue_before": (not self._queue_announced) if capacity_line else self._queue_announced,
+            "sent_at": now, "suppressed": self._suppressed,
+        }
         for _, tr in new_problems:
             tr.announced, tr.last_alert_at = True, now
         for _, tr in recovered:
@@ -176,6 +184,27 @@ class AlertEngine:
         msg = self._render(new_problems, recovered, capacity_line, startup)
         self._suppressed = 0
         return msg
+
+    def undo_last(self) -> bool:
+        """The last message reached no admin: forget it was sent, so it is retried.
+
+        Restores announced flags, cooldown stamps, the queue flag, the hourly counter and
+        the suppressed count. Before 1.6 the alert was marked as sent before delivery and
+        a failed send lost it for good."""
+        last, self._last = self._last, None
+        if last is None:
+            return False
+        for tr, previous_stamp in last["problems"]:
+            tr.announced, tr.last_alert_at = False, previous_stamp
+        for tr in last["recovered"]:
+            tr.announced = True
+        self._queue_announced = last["queue_before"]
+        try:
+            self._sent_at.remove(last["sent_at"])
+        except ValueError:
+            pass
+        self._suppressed = last["suppressed"]
+        return True
 
     def _render(self, problems: list[tuple[int, _Track]], recovered: list[tuple[int, _Track]],
                 capacity: str | None, startup: bool) -> str:
@@ -268,11 +297,16 @@ async def run_alert_loop(*, engine: AlertEngine, overview: Callable[[], Awaitabl
             continue
         if msg is None:
             continue
+        delivered = 0
         for admin_id in admins:
             try:
                 await send(admin_id, msg)
+                delivered += 1
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Platform alert not delivered admin_id=%s error=%s",
                                admin_id, type(exc).__name__)
+        if admins and not delivered:
+            engine.undo_last()
+            logger.warning("Platform alert reached no admin; it will be retried next check")
