@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -77,15 +78,20 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         user_id = message.from_user.id if message.from_user else 0
         if user_id in admin_ids:
             return
-        tenant = await registry.get_tenant(user_id)
-        if tenant:
+        tenant, dead = await ownership(user_id)
+        if tenant is not None and tenant.enabled:
             await message.answer(
                 f"🤖 ربات اختصاصی شما فعال است: @{tenant.username}\n\n"
                 "برای مدیریت و دیدن راهنما، ربات خودتان را باز کنید و /start بزنید.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(tenant.username)]),
             )
+        elif tenant is not None:
+            await refuse_if_blocked(message.answer, user_id)
         else:
+            gone = (f"ربات قبلی شما (@{dead[0].username}) در تلگرام حذف شده یا توکنش باطل شده است؛ "
+                    "می‌توانید یک ربات تازه بسازید یا همان را دوباره وصل کنید.\n\n") if dead else ""
             await message.answer(
+                gone +
                 "سلام! به <b>ZIKO</b> خوش آمدید 👋\n\n"
                 "با ZIKO یک ربات اختصاصی می‌سازید که وقتی در دسترس نیستید، "
                 "از طرف حساب تلگرام شما به پیام‌ها پاسخ می‌دهد.\n\n"
@@ -93,16 +99,70 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
                 parse_mode="HTML", reply_markup=_welcome_keyboard(),
             )
 
+    async def _token_rejected(token: str) -> bool:
+        """True only when Telegram itself rejects the token (bot deleted or token revoked).
+        A network problem is "unknown", never "dead": the bot is then not replaced."""
+        if not token:
+            return False
+        probe = None
+        try:
+            probe = Bot(token=token)
+            await probe.get_me()
+            return False
+        except TelegramUnauthorizedError:
+            return True
+        except Exception:
+            return False
+        finally:
+            if probe is not None:
+                await probe.session.close()
+
+    async def ownership(user_id: int) -> tuple[Any, list[Any]]:
+        """(blocking bot or None, dead bots of this user that may be replaced).
+
+        Blocking: an enabled bot, or a disabled bot whose token Telegram still accepts
+        (disabled on purpose, e.g. by an admin). Dead: disabled and rejected by Telegram.
+        """
+        bots = await registry.list_tenants(user_id=user_id)
+        active = [t for t in bots if t.enabled]
+        if active:
+            return active[0], []
+        blocking, dead = None, []
+        for t in bots:
+            try:
+                full = await registry.get_tenant_by_bot_id(t.bot_id, reveal_token=True)
+            except Exception:
+                full = None
+            if full is not None and await _token_rejected(full.bot_token):
+                dead.append(t)
+            elif blocking is None:
+                blocking = t
+        return blocking, dead
+
+    async def refuse_if_blocked(answer: Any, user_id: int) -> bool:
+        """Tell the user why a new bot is not possible. True when refused."""
+        if user_id in admin_ids:
+            return False
+        blocking, _dead = await ownership(user_id)
+        if blocking is None:
+            return False
+        if blocking.enabled:
+            await answer(
+                f"شما قبلاً ربات @{blocking.username} را ثبت کرده‌اید. "
+                "در حال حاضر هر حساب می‌تواند یک ربات فعال در ZIKO داشته باشد.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(blocking.username)]),
+            )
+        else:
+            await answer(
+                f"ربات @{blocking.username} شما در ZIKO غیرفعال شده است، اما هنوز در تلگرام وجود دارد.\n"
+                "برای فعال‌سازی دوباره با پشتیبانی ZIKO تماس بگیرید."
+            )
+        return True
+
     async def offer_creation(message: Message, user: Any) -> None:
         """The creation choices. Shared by /create_bot and the ✨ button."""
         user_id = user.id if user else 0
-        existing = await registry.get_tenant(user_id)
-        if existing and user_id not in admin_ids:
-            await message.answer(
-                f"شما قبلاً ربات @{existing.username} را ثبت کرده‌اید. "
-                "در حال حاضر هر حساب می‌تواند یک ربات فعال در ZIKO داشته باشد.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(existing.username)]),
-            )
+        if await refuse_if_blocked(message.answer, user_id):
             return
 
         me = await message.bot.get_me()
@@ -148,9 +208,8 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
     @router.callback_query(F.data == CONNECT_CB)
     async def connect_existing(callback: CallbackQuery, state: FSMContext) -> None:
         user_id = callback.from_user.id
-        existing = await registry.get_tenant(user_id)
-        if existing and user_id not in admin_ids:
-            await callback.answer("شما قبلاً یک ربات ثبت کرده‌اید.", show_alert=True)
+        if isinstance(callback.message, Message) and await refuse_if_blocked(callback.message.answer, user_id):
+            await callback.answer()
             return
         await state.set_state(BotSetup.waiting_for_token)
         if isinstance(callback.message, Message):
@@ -163,9 +222,7 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
     @router.message(Command("connect_bot"))
     async def connect_bot(message: Message, state: FSMContext) -> None:
         user_id = message.from_user.id if message.from_user else 0
-        existing = await registry.get_tenant(user_id)
-        if existing:
-            await message.answer(f"شما قبلاً ربات @{existing.username} را ثبت کرده‌اید.")
+        if await refuse_if_blocked(message.answer, user_id):
             return
         await state.set_state(BotSetup.waiting_for_token)
         await message.answer(
@@ -208,11 +265,26 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         if not me.is_bot or me.id == master_bot_id:
             await message.answer("این توکن برای ثبت ربات زیرمجموعه قابل استفاده نیست.")
             return
+        _blocking, dead = await ownership(user_id)
+        dead_ids = [t.bot_id for t in dead]
         try:
-            tenant = await registry.add_tenant(
-                user_id=user_id, bot_id=me.id, username=me.username or str(me.id),
-                token=token, allow_multiple=user_id in admin_ids,
-            )
+            same = await registry.get_tenant_by_bot_id(me.id)
+            if same is not None and same.user_id == user_id:
+                # The same bot again (e.g. its token was revoked and a new one issued).
+                await manager.stop_tenant(me.id)
+                tenant = await registry.update_tenant_credentials(
+                    user_id=user_id, bot_id=me.id, username=me.username or str(me.id), token=token,
+                    enable=me.id in dead_ids,
+                )
+                if tenant is None:
+                    raise BotAlreadyRegistered()
+            else:
+                tenant = await registry.add_tenant(
+                    user_id=user_id, bot_id=me.id, username=me.username or str(me.id),
+                    token=token, allow_multiple=user_id in admin_ids, replace_bot_ids=dead_ids,
+                )
+            if dead_ids:
+                logger.info("Replaced dead child bots user_id=%s old=%s new=%s", user_id, dead_ids, me.id)
         except UserAlreadyHasBot:
             logger.warning("Tenant registration refused reason=UserAlreadyHasBot")
             await message.answer("شما قبلاً یک ربات ثبت کرده‌اید؛ هر کاربر فقط یک ربات می‌تواند داشته باشد.")
@@ -323,11 +395,15 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
                     await _restart_previous_poller(child.id)
                     return
             else:
+                _blocking, dead = await ownership(owner_id)
                 tenant = await registry.add_tenant(
                     user_id=owner_id, bot_id=child.id,
                     username=child.username or str(child.id), token=token,
-                    allow_multiple=owner_id in admin_ids,
+                    allow_multiple=owner_id in admin_ids, replace_bot_ids=[t.bot_id for t in dead],
                 )
+                if dead:
+                    logger.info("Replaced dead child bots owner_id=%s old=%s new=%s",
+                                owner_id, [t.bot_id for t in dead], child.id)
         except UserAlreadyHasBot:
             # Was silent before 1.5.2: the new bot then looked "lost" in the logs.
             logger.warning("Managed bot not registered reason=UserAlreadyHasBot owner_id=%s bot_id=%s",

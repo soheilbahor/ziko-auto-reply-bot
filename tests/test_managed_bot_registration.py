@@ -50,12 +50,16 @@ class FakeTelegram(BaseSession):
 
 
 class Registry:
-    def __init__(self, refuse: Exception | None = None) -> None:
+    def __init__(self, refuse: Exception | None = None, existing: list[Any] | None = None) -> None:
         self.added: list[dict[str, Any]] = []
         self.refuse = refuse
+        self.existing = existing or []
+
+    async def list_tenants(self, *, reveal_tokens: bool = False, user_id: int | None = None):
+        return [t for t in self.existing if user_id is None or t.user_id == user_id]
 
     async def get_tenant_by_bot_id(self, bot_id: int, reveal_token: bool = False):
-        return None
+        return next((t for t in self.existing if t.bot_id == bot_id), None)
 
     async def add_tenant(self, **kw: Any):
         if self.refuse is not None:
@@ -84,7 +88,31 @@ def managed_update(update_id: int = 1) -> dict[str, Any]:
     }}
 
 
-async def feed(registry: Registry) -> tuple[Any, Manager, FakeTelegram]:
+async def feed(registry: Registry, monkeypatch: Any = None, rejected: set[str] | None = None
+               ) -> tuple[Any, Manager, FakeTelegram]:
+    if monkeypatch is not None:
+        import app.handlers.tenants as tenants_module
+        from aiogram.exceptions import TelegramUnauthorizedError
+        from aiogram.methods import GetMe
+
+        class Probe(BaseSession):
+            def __init__(self, token: str) -> None:
+                super().__init__()
+                self.token = token
+
+            async def close(self) -> None:
+                pass
+
+            async def stream_content(self, *a: Any, **k: Any):  # pragma: no cover
+                yield b""
+
+            async def make_request(self, bot: Any, method: Any, timeout: int | None = None) -> Any:
+                if self.token in (rejected or set()):
+                    raise TelegramUnauthorizedError(method=GetMe(), message="Unauthorized")
+                return aiogram.types.User(id=1, is_bot=True, first_name="alive")
+
+        real_bot = tenants_module.Bot
+        monkeypatch.setattr(tenants_module, "Bot", lambda token, **kw: real_bot(token=token, session=Probe(token)))
     session = FakeTelegram()
     bot = Bot(token=MASTER_TOKEN, session=session)
     dp = Dispatcher()
@@ -136,3 +164,45 @@ def test_welcome_and_connected_texts_need_no_commands_or_premium():
     assert [b.callback_data for row in kb.inline_keyboard for b in row] == [tenants.CREATE_CB, tenants.CONNECT_CB]
     text = tenants.connected_text("NewZikoBot")
     assert "@NewZikoBot" in text and "Premium" not in text and "Chatbots" in text
+
+
+
+def _old_bot(enabled: bool, token: str):
+    from types import SimpleNamespace
+    return SimpleNamespace(user_id=OWNER, bot_id=8111111111, username="OldDeletedBot", enabled=enabled,
+                           bot_token=token)
+
+
+OLD_TOKEN = "8111111111:AAFakeOldTokenForTestsOnly_0123456789ab"
+
+
+@pytest.mark.asyncio
+async def test_owner_whose_bot_was_deleted_can_register_a_new_one(monkeypatch):
+    """Regression: a bot deleted in @BotFather stayed in the registry (disabled) and blocked
+    the owner forever: no new bot, no re-creation."""
+    registry = Registry(existing=[_old_bot(False, OLD_TOKEN)])
+    calls = []
+    real_add = registry.add_tenant
+
+    async def add(**kw):
+        calls.append(kw.get("replace_bot_ids"))
+        return await real_add(**kw)
+    registry.add_tenant = add
+    _r, manager, _s = await feed(registry, monkeypatch, rejected={OLD_TOKEN})
+    assert manager.started == [CHILD]
+    assert calls == [[8111111111]]               # the dead bot is replaced, nothing else
+
+
+@pytest.mark.asyncio
+async def test_disabled_but_alive_bot_is_not_replaced(monkeypatch):
+    """A bot disabled by an admin (token still valid) must not be bypassed."""
+    registry = Registry(existing=[_old_bot(False, OLD_TOKEN)])
+    calls = []
+    real_add = registry.add_tenant
+
+    async def add(**kw):
+        calls.append(kw.get("replace_bot_ids"))
+        return await real_add(**kw)
+    registry.add_tenant = add
+    await feed(registry, monkeypatch, rejected=set())
+    assert calls == [[]]

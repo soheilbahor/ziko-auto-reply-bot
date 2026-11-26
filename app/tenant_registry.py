@@ -5,6 +5,8 @@ register multiple child bots. Tokens are encrypted with a local Fernet key.
 """
 from __future__ import annotations
 
+from collections.abc import Collection
+
 import asyncio
 import os
 from dataclasses import dataclass, field
@@ -165,14 +167,28 @@ class TenantRegistry:
 
     async def add_tenant(
         self, *, user_id: int, bot_id: int, username: str, token: str,
-        allow_multiple: bool = False,
+        allow_multiple: bool = False, replace_bot_ids: Collection[int] = (),
     ) -> Tenant:
+        """Register a child bot.
+
+        ``replace_bot_ids``: DISABLED bots of the same user that Telegram no longer accepts
+        (deleted in @BotFather or token revoked). They are removed in the same transaction,
+        so the user can register a new bot. The caller must have verified them; enabled
+        bots and bots of other users are never removed here.
+        """
         conn = self._require_conn()
         assert self._fernet is not None
         encrypted = self._fernet.encrypt(token.encode("utf-8")).decode("ascii")
+        replace = tuple(int(b) for b in replace_bot_ids if int(b) != bot_id)
         async with self._lock:
             await conn.execute("BEGIN IMMEDIATE")
             try:
+                if replace:
+                    marks = ",".join("?" * len(replace))
+                    await conn.execute(
+                        f"DELETE FROM tenants WHERE user_id=? AND enabled=0 AND bot_id IN ({marks})",
+                        (user_id, *replace),
+                    )
                 async with conn.execute("SELECT COUNT(*) FROM tenants") as cur:
                     total = int((await cur.fetchone())[0])
                 if total >= self.max_total:
@@ -218,7 +234,7 @@ class TenantRegistry:
         )
 
     async def update_tenant_credentials(
-        self, *, user_id: int, bot_id: int, username: str, token: str
+        self, *, user_id: int, bot_id: int, username: str, token: str, enable: bool = False,
     ) -> Tenant | None:
         """Update a managed bot token after Telegram reports a token/owner update.
 
@@ -239,7 +255,8 @@ class TenantRegistry:
                     await conn.rollback()
                     return None
                 await conn.execute(
-                    "UPDATE tenants SET username=?, encrypted_token=? WHERE bot_id=? AND user_id=?",
+                    "UPDATE tenants SET username=?, encrypted_token=?"
+                    + (", enabled=1" if enable else "") + " WHERE bot_id=? AND user_id=?",
                     (username, encrypted, bot_id, user_id),
                 )
                 async with conn.execute(

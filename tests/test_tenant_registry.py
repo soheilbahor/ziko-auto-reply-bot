@@ -203,3 +203,60 @@ async def test_per_user_hourly_registration_limit_is_enforced(tmp_path):
             )
     finally:
         await registry.close()
+
+
+
+TOK_A = "123456789:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN"
+TOK_B = "123456789:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMO"
+
+
+@pytest.mark.asyncio
+async def test_dead_disabled_bot_can_be_replaced_by_a_new_one(tmp_path):
+    registry = TenantRegistry(tmp_path / "tenants.sqlite3")
+    await registry.initialize()
+    try:
+        await registry.add_tenant(user_id=1001, bot_id=2001, username="deleted_bot", token=TOK_A)
+        await registry.set_tenant_enabled(2001, False)
+        with pytest.raises(UserAlreadyHasBot):
+            await registry.add_tenant(user_id=1001, bot_id=2002, username="new_bot", token=TOK_B)
+        new = await registry.add_tenant(user_id=1001, bot_id=2002, username="new_bot", token=TOK_B,
+                                        replace_bot_ids=[2001])
+        assert new.bot_id == 2002
+        assert [t.bot_id for t in await registry.list_tenants(user_id=1001)] == [2002]
+    finally:
+        await registry.close()
+
+
+@pytest.mark.asyncio
+async def test_replace_never_removes_enabled_or_foreign_bots(tmp_path):
+    registry = TenantRegistry(tmp_path / "tenants.sqlite3")
+    await registry.initialize()
+    try:
+        await registry.add_tenant(user_id=1001, bot_id=2001, username="live_bot", token=TOK_A)
+        await registry.add_tenant(user_id=1002, bot_id=3001, username="other_bot", token=TOK_B)
+        await registry.set_tenant_enabled(3001, False)
+        with pytest.raises(UserAlreadyHasBot):      # enabled bot is not removed
+            await registry.add_tenant(user_id=1001, bot_id=2002, username="x", token=TOK_B,
+                                      replace_bot_ids=[2001])
+        await registry.add_tenant(user_id=1003, bot_id=4001, username="y", token=TOK_A,
+                                  replace_bot_ids=[3001])   # another user's bot id: ignored
+        assert await registry.get_tenant_by_bot_id(2001) is not None
+        assert await registry.get_tenant_by_bot_id(3001) is not None
+    finally:
+        await registry.close()
+
+
+@pytest.mark.asyncio
+async def test_credential_update_can_reenable(tmp_path):
+    registry = TenantRegistry(tmp_path / "tenants.sqlite3")
+    await registry.initialize()
+    try:
+        await registry.add_tenant(user_id=1001, bot_id=2001, username="bot", token=TOK_A)
+        await registry.set_tenant_enabled(2001, False)
+        kept = await registry.update_tenant_credentials(user_id=1001, bot_id=2001, username="bot", token=TOK_B)
+        assert kept is not None and not kept.enabled
+        back = await registry.update_tenant_credentials(user_id=1001, bot_id=2001, username="bot", token=TOK_B,
+                                                        enable=True)
+        assert back is not None and back.enabled and back.bot_token == TOK_B
+    finally:
+        await registry.close()

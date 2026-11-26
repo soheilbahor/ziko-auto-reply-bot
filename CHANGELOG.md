@@ -1,3 +1,12 @@
+## [1.5.4] - 2026-11-26
+
+### Fixed
+- An owner whose child bot was deleted in @BotFather (or whose token was revoked) was locked
+  out: the disabled bot stayed registered, so neither a new bot nor a re-created one could
+  be connected. Now, when Telegram rejects the old bot's token, it is replaced in the same
+  transaction; a bot disabled on purpose (token still valid) still blocks, with a clear
+  message. Re-connecting the same bot with a new token re-enables it.
+
 ## [1.5.3] - 2026-11-26
 
 ### Changed
