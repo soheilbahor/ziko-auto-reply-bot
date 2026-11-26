@@ -742,6 +742,13 @@ class Database:
                 "UPDATE statuses SET deleted_at = ?, is_active = 0, updated_at = ? WHERE key = ?",
                 (now, now, status_key),
             )
+            # Soft delete never fires ON DELETE: clean the v1.5 side tables explicitly, so a
+            # hidden status can never be re-activated by the online/offline switch.
+            await self._ensure_rotation(conn)
+            await _execute(conn, "DELETE FROM reply_variants WHERE status_key = ?", (status_key,))
+            await _execute(conn, "DELETE FROM reply_rotation WHERE status_key = ?", (status_key,))
+            await _execute(conn, "UPDATE availability SET online_key = NULL WHERE online_key = ?", (status_key,))
+            await _execute(conn, "UPDATE availability SET offline_key = NULL WHERE offline_key = ?", (status_key,))
 
     async def list_reply_steps(self, status_key: str) -> list[ReplyStep]:
         async with self._read() as conn:
@@ -758,6 +765,156 @@ class Database:
         async with self._write() as conn:
             await _require_status(conn, status_key)
             await _write_steps(conn, status_key, clean_steps, self._now())
+
+    # -- reply rotation and online/offline availability (v1.5) ------------------------
+    # Additive tables created on demand (like owner_favourites): no schema bump, older
+    # releases ignore them, so a rollback keeps working. Variants of a deleted status are
+    # removed by ON DELETE CASCADE.
+    _ROTATION_DDL = (
+        "CREATE TABLE IF NOT EXISTS reply_variants ("
+        "status_key TEXT NOT NULL REFERENCES statuses (key) ON UPDATE CASCADE ON DELETE CASCADE, "
+        "position INTEGER NOT NULL CHECK (position BETWEEN 1 AND 30), "
+        "content TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 4096), "
+        "PRIMARY KEY (status_key, position)) WITHOUT ROWID",
+        "CREATE TABLE IF NOT EXISTS reply_rotation ("
+        "status_key TEXT PRIMARY KEY REFERENCES statuses (key) ON UPDATE CASCADE ON DELETE CASCADE, "
+        "mode TEXT NOT NULL CHECK (mode IN ('random', 'sequence')), "
+        "cursor INTEGER NOT NULL DEFAULT 0 CHECK (cursor >= 0)) WITHOUT ROWID",
+        "CREATE TABLE IF NOT EXISTS availability ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "online_key TEXT REFERENCES statuses (key) ON UPDATE CASCADE ON DELETE SET NULL, "
+        "offline_key TEXT REFERENCES statuses (key) ON UPDATE CASCADE ON DELETE SET NULL, "
+        "state TEXT NOT NULL DEFAULT 'offline' CHECK (state IN ('online', 'offline')), "
+        "updated_at TEXT NOT NULL)",
+    )
+
+    async def _ensure_rotation(self, conn: aiosqlite.Connection) -> None:
+        for ddl in self._ROTATION_DDL:
+            await _execute(conn, ddl)
+
+    async def set_reply_variants(self, status_key: str, variants: Sequence[str], mode: str) -> None:
+        """Replace a status's variants. Fewer than 2 variants turns rotation off."""
+        from app.rotation import MAX_VARIANTS, MODES
+
+        if mode not in MODES:
+            raise InvalidReplyTextError("rotation mode must be 'random' or 'sequence'")
+        cleaned = [_validate_reply_text(v) for v in variants]
+        if len(cleaned) > MAX_VARIANTS:
+            raise InvalidReplyTextError(f"at most {MAX_VARIANTS} variants")
+        async with self._write() as conn:
+            await self._ensure_rotation(conn)
+            await _require_status(conn, status_key)
+            await _execute(conn, "DELETE FROM reply_variants WHERE status_key = ?", (status_key,))
+            await _execute(conn, "DELETE FROM reply_rotation WHERE status_key = ?", (status_key,))
+            if len(cleaned) >= 2:
+                for position, text in enumerate(cleaned, 1):
+                    await _execute(conn, "INSERT INTO reply_variants (status_key, position, content) "
+                                         "VALUES (?, ?, ?)", (status_key, position, text))
+                await _execute(conn, "INSERT INTO reply_rotation (status_key, mode, cursor) VALUES (?, ?, 0)",
+                               (status_key, mode))
+
+    async def get_reply_variants(self, status_key: str) -> tuple[str | None, list[str]]:
+        """Return (mode or None when rotation is off, variants)."""
+        async with self._write() as conn:
+            await self._ensure_rotation(conn)
+            row = await _fetch_one(conn, "SELECT mode FROM reply_rotation WHERE status_key = ?", (status_key,))
+            rows = await _fetch_all(conn, "SELECT content FROM reply_variants WHERE status_key = ? "
+                                          "ORDER BY position", (status_key,))
+        if row is None or len(rows) < 2:
+            return None, []
+        return str(row[0]), [str(r[0]) for r in rows]
+
+    async def next_reply_variant(self, status_key: str, *,
+                                 randbelow: Any = None) -> str | None:
+        """Pick the variant to send now, advancing the sequence cursor atomically.
+
+        Returns None when rotation is off (the caller uses the normal reply steps).
+        """
+        from app import rotation
+
+        async with self._write() as conn:
+            await self._ensure_rotation(conn)
+            row = await _fetch_one(conn, "SELECT mode, cursor FROM reply_rotation WHERE status_key = ?",
+                                   (status_key,))
+            if row is None:
+                return None
+            rows = await _fetch_all(conn, "SELECT content FROM reply_variants WHERE status_key = ? "
+                                          "ORDER BY position", (status_key,))
+            if len(rows) < 2:
+                return None
+            kwargs = {"randbelow": randbelow} if randbelow is not None else {}
+            index, cursor = rotation.choose(len(rows), str(row[0]), int(row[1]), **kwargs)
+            if cursor != int(row[1]):
+                await _execute(conn, "UPDATE reply_rotation SET cursor = ? WHERE status_key = ?",
+                               (cursor, status_key))
+        return str(rows[index][0])
+
+    async def get_availability(self) -> dict[str, Any]:
+        async with self._write() as conn:
+            await self._ensure_rotation(conn)
+            row = await _fetch_one(conn, "SELECT online_key, offline_key, state FROM availability WHERE id = 1")
+        if row is None:
+            return {"online_key": None, "offline_key": None, "state": "offline"}
+        return {"online_key": row[0], "offline_key": row[1], "state": str(row[2])}
+
+    async def set_availability_keys(self, *, online_key: str | None, offline_key: str | None) -> None:
+        if online_key is not None and online_key == offline_key:
+            raise InvalidReplyTextError("online and offline statuses must differ")
+        async with self._write() as conn:
+            await self._ensure_rotation(conn)
+            for key in (online_key, offline_key):
+                if key is not None:
+                    await _require_status(conn, key)
+            await _execute(conn,
+                           "INSERT INTO availability (id, online_key, offline_key, state, updated_at) "
+                           "VALUES (1, ?, ?, 'offline', ?) ON CONFLICT (id) DO UPDATE SET "
+                           "online_key = excluded.online_key, offline_key = excluded.offline_key, "
+                           "updated_at = excluded.updated_at",
+                           (online_key, offline_key, self._now()))
+
+    async def set_availability(self, state: str) -> AppState:
+        """Switch to the linked online/offline status (starts a new session)."""
+        if state not in ("online", "offline"):
+            raise InvalidReplyTextError("state must be 'online' or 'offline'")
+        current = await self.get_availability()
+        key = current["online_key"] if state == "online" else current["offline_key"]
+        if key is None:
+            raise InvalidReplyTextError(f"no {state} status is linked")
+        app_state = await self.activate_status(key)
+        async with self._write() as conn:
+            await _execute(conn, "UPDATE availability SET state = ?, updated_at = ? WHERE id = 1",
+                           (state, self._now()))
+        return app_state
+
+    # -- reply-library favourites (v1.5) --------------------------------------------
+    # Additive table created on demand: older releases ignore it, so rollback stays safe.
+    _FAVOURITES_DDL = (
+        "CREATE TABLE IF NOT EXISTS owner_favourites ("
+        "message_id TEXT PRIMARY KEY CHECK (length(message_id) BETWEEN 3 AND 80), "
+        "created_at TEXT NOT NULL) WITHOUT ROWID"
+    )
+
+    async def list_favourites(self) -> list[str]:
+        async with self._write() as conn:
+            await _execute(conn, self._FAVOURITES_DDL)
+            rows = await _fetch_all(conn, "SELECT message_id FROM owner_favourites ORDER BY created_at")
+        return [str(r[0]) for r in rows]
+
+    async def toggle_favourite(self, message_id: str, *, limit: int = 50) -> bool:
+        """Add or remove a library message id. Returns True if it is now a favourite."""
+        if not isinstance(message_id, str) or not 3 <= len(message_id) <= 80 or not message_id.isascii():
+            raise InvalidReplyTextError("invalid library message id")
+        async with self._write() as conn:
+            await _execute(conn, self._FAVOURITES_DDL)
+            if await _fetch_one(conn, "SELECT 1 FROM owner_favourites WHERE message_id = ?", (message_id,)):
+                await _execute(conn, "DELETE FROM owner_favourites WHERE message_id = ?", (message_id,))
+                return False
+            count = await _fetch_one(conn, "SELECT COUNT(*) FROM owner_favourites")
+            if count is not None and int(count[0]) >= limit:
+                raise OverflowError(limit)
+            await _execute(conn, "INSERT INTO owner_favourites (message_id, created_at) VALUES (?, ?)",
+                           (message_id, self._now()))
+            return True
 
     async def get_owner_settings(self) -> OwnerSettings:
         async with self._read() as conn:

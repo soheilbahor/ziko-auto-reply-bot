@@ -148,8 +148,23 @@ install -d -o root -g "$APP_GROUP" -m 750 "$CONF_DIR"
 install -d -o "$APP_USER" -g "$APP_GROUP" -m 700 "$DATA_DIR" "$BACKUP_DIR"
 if [[ "$KEEP_CONFIG" -eq 0 ]]; then
   tmp="$(mktemp "$CONF_DIR/.ziko.env.XXXXXX")"
-  printf '# ZIKO configuration; keep private.\nBOT_TOKEN=%s\nADMIN_IDS=%s\nBUSINESS_OWNER_ID=%s\nDATABASE_PATH=%s\nLOG_LEVEL=INFO\n' \
-    "$NEW_TOKEN" "$NEW_ADMINS" "$NEW_OWNER_ID" "$DB_FILE" > "$tmp"
+  KEY_LINE=""
+  # Fresh installs keep the child-bot token key in $CONF_DIR (root:ziko 0640), out of
+  # the data directory and out of platform backups. Never when tenant data already exists:
+  # that installation keeps whatever key it has (move it with: ziko security move-key).
+  if [[ ! -e "$DATA_DIR/tenants.sqlite3" && ! -e "$DATA_DIR/tenant-token.key" ]]; then
+    if [[ -e "$CONF_DIR/tenant-token.key" ]]; then
+      log "Keeping the existing token key at $CONF_DIR/tenant-token.key (never overwritten)."
+    else
+      ktmp="$(mktemp "$CONF_DIR/.tenant-token.key.XXXXXX")"
+      python3.12 -c 'import base64,os,sys; sys.stdout.write(base64.urlsafe_b64encode(os.urandom(32)).decode()+"\n")' > "$ktmp"
+      chown "root:$APP_GROUP" "$ktmp"; chmod 640 "$ktmp"
+      ln -- "$ktmp" "$CONF_DIR/tenant-token.key"; rm -f -- "$ktmp"
+    fi
+    KEY_LINE="ZIKO_TENANT_KEY_FILE=$CONF_DIR/tenant-token.key"
+  fi
+  printf '# ZIKO configuration; keep private.\nBOT_TOKEN=%s\nADMIN_IDS=%s\nBUSINESS_OWNER_ID=%s\nDATABASE_PATH=%s\nLOG_LEVEL=INFO\n%s\n' \
+    "$NEW_TOKEN" "$NEW_ADMINS" "$NEW_OWNER_ID" "$DB_FILE" "$KEY_LINE" > "$tmp"
   chown "root:$APP_GROUP" "$tmp"; chmod 640 "$tmp"; mv -- "$tmp" "$CONF_FILE"
   NEW_TOKEN=""
 else
@@ -299,6 +314,10 @@ log "To open management panel, run: ziko"
 log "Root privileges are required."
 log "Previous version preserved at: ${PREVIOUS:-none}"
 log "Auto-reply remains OFF unless explicitly enabled in the application."
+if [[ -f "$CONF_DIR/tenant-token.key" ]]; then
+  log "IMPORTANT: child-bot tokens are encrypted with $CONF_DIR/tenant-token.key."
+  log "It is NOT included in backups. Keep an offline copy, e.g.: sudo cat $CONF_DIR/tenant-token.key"
+fi
 log "App=$APP_DIR Config=$CONF_FILE Database=$DB_FILE Backups=$BACKUP_DIR CLI=$CLI_LINK"
 trap - ERR INT TERM
 exit 0

@@ -66,7 +66,18 @@ echo "Encrypted database backup created and verified: $OUT"
 # Full platform snapshot: main DB, child-bot registry/key, and isolated tenant DBs.
 DATA_DIR="$(dirname "$DB")"
 REGISTRY_DB="$DATA_DIR/tenants.sqlite3"
-TENANT_KEY="$DATA_DIR/tenant-token.key"
+# Token-key location: ZIKO_TENANT_KEY_FILE from the environment or ziko.env, else legacy.
+TENANT_KEY_EXTERNAL=0
+TENANT_KEY="${ZIKO_TENANT_KEY_FILE:-}"
+if [[ -z "$TENANT_KEY" && -r "$ENV_FILE" ]]; then
+  TENANT_KEY="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?ZIKO_TENANT_KEY_FILE=\(.*\)$/\2/p' "$ENV_FILE" | tail -n1 | tr -d "\"'")"
+fi
+if [[ -n "$TENANT_KEY" && "$TENANT_KEY" != "$DATA_DIR/tenant-token.key" ]]; then
+  [[ "$TENANT_KEY" == /* ]] || die "ZIKO_TENANT_KEY_FILE must be an absolute path."
+  TENANT_KEY_EXTERNAL=1
+else
+  TENANT_KEY="$DATA_DIR/tenant-token.key"
+fi
 TENANT_DIR="$DATA_DIR/tenants"
 PLATFORM_ARCHIVE="$DEST/ziko-platform-${STAMP}-$$.tar.gz.age"
 [[ ! -e "$PLATFORM_ARCHIVE" && ! -L "$PLATFORM_ARCHIVE" && ! -e "$PLATFORM_ARCHIVE.sha256" ]] \
@@ -117,7 +128,12 @@ PYCODE
 if [[ -f "$REGISTRY_DB" && ! -L "$REGISTRY_DB" ]]; then
   backup_sqlite "$REGISTRY_DB" "$PLATFORM_TMP/registry.sqlite3"
 fi
-if [[ -f "$REGISTRY_DB" && -f "$TENANT_KEY" && ! -L "$TENANT_KEY" ]]; then
+if [[ "$TENANT_KEY_EXTERNAL" -eq 1 ]]; then
+  # The key is stored outside the data directory on purpose: never copy it into a backup.
+  # Restoring child bots needs the separately kept key file (see docs/UPDATE_AND_BACKUP.md).
+  [[ ! -f "$REGISTRY_DB" || ( -f "$TENANT_KEY" && ! -L "$TENANT_KEY" ) ]] \
+    || die "Tenant registry exists but its external key is missing: $TENANT_KEY; platform backup refused."
+elif [[ -f "$REGISTRY_DB" && -f "$TENANT_KEY" && ! -L "$TENANT_KEY" ]]; then
   install -m 600 "$TENANT_KEY" "$PLATFORM_TMP/tenant-token.key"
 fi
 if [[ -d "$TENANT_DIR" && ! -L "$TENANT_DIR" ]]; then
@@ -129,7 +145,7 @@ if [[ -d "$TENANT_DIR" && ! -L "$TENANT_DIR" ]]; then
     backup_sqlite "$tenant_db" "$PLATFORM_TMP/tenants/$name"
   done < <(find "$TENANT_DIR" -maxdepth 1 -type f -name '*.sqlite3' -print0)
 fi
-if [[ -f "$PLATFORM_TMP/registry.sqlite3" && ! -f "$PLATFORM_TMP/tenant-token.key" ]]; then
+if [[ "$TENANT_KEY_EXTERNAL" -eq 0 && -f "$PLATFORM_TMP/registry.sqlite3" && ! -f "$PLATFORM_TMP/tenant-token.key" ]]; then
   die "Tenant registry exists but its encryption key is missing; platform backup refused."
 fi
 : "${ZIKO_AGE_RECIPIENT:?Set ZIKO_AGE_RECIPIENT to an age public recipient before creating platform backups.}"
@@ -139,7 +155,13 @@ command -v age >/dev/null 2>&1 || die "age is required for encrypted platform ba
 BACKUP_ID="${STAMP}-$$"
 APP_VERSION="unknown"
 [[ -f "$APP_DIR/VERSION" ]] && APP_VERSION="$(tr -d '[:space:]' < "$APP_DIR/VERSION")"
-"$PY" - "$PLATFORM_TMP" "$BACKUP_ID" "$APP_VERSION" <<'PYCODE'
+KEY_FPR=""
+if [[ "$TENANT_KEY_EXTERNAL" -eq 1 && -f "$TENANT_KEY" ]]; then
+  # Fingerprint only (SHA-256 of the key file), so restore can tell whether the
+  # separately kept key matches this archive. The key itself is not recoverable from it.
+  KEY_FPR="$(sha256sum "$TENANT_KEY" | awk '{print $1}')"
+fi
+"$PY" - "$PLATFORM_TMP" "$BACKUP_ID" "$APP_VERSION" "$KEY_FPR" <<'PYCODE'
 import hashlib, json, sqlite3, sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -169,6 +191,9 @@ manifest = {
     "schema_versions": schema,
     "files": files,
 }
+if sys.argv[4]:
+    # External key: excluded from the archive; only its fingerprint is recorded.
+    manifest["tenant_key"] = {"location": "external", "sha256": sys.argv[4]}
 (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PYCODE
 chmod 600 "$PLATFORM_TMP/manifest.json"

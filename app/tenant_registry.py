@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiosqlite
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
+
+from app import key_location
 
 
 class TenantRegistryError(RuntimeError):
@@ -60,9 +62,11 @@ class TenantRegistry:
         )
         if self.max_total < 1 or self.per_user_per_hour < 1:
             raise ValueError("Tenant registration limits must be positive integers.")
-        self.key_path = self.path.with_name("tenant-token.key")
+        # Legacy default: next to the registry. ZIKO_TENANT_KEY_FILE moves it out of the
+        # data directory (see app/key_location.py); then it is never created here.
+        self.key_path, self.key_external = key_location.resolve(self.path.parent)
         self._conn: aiosqlite.Connection | None = None
-        self._fernet: Fernet | None = None
+        self._fernet: MultiFernet | None = None
         self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -121,6 +125,14 @@ class TenantRegistry:
         self._conn = conn
 
     def _load_or_create_key(self) -> None:
+        if self.key_external:
+            # Owned by root and read-only for the service: never create or chmod it here.
+            try:
+                key_location.check_external_file(self.key_path)
+            except key_location.KeyLocationError as exc:
+                raise TenantRegistryError(str(exc)) from None
+            self._fernet = self._parse_key(self.key_path.read_bytes())
+            return
         try:
             fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
@@ -131,9 +143,18 @@ class TenantRegistry:
                 stream.flush()
                 os.fsync(stream.fileno())
         os.chmod(self.key_path, 0o600)
-        key = self.key_path.read_bytes()
+        self._fernet = self._parse_key(self.key_path.read_bytes())
+
+    @staticmethod
+    def _parse_key(raw: bytes) -> MultiFernet:
+        # One key per line, newest first (see app/key_rotation.py). MultiFernet encrypts
+        # with the first key and decrypts with any, so an interrupted rotation never
+        # locks the service out of its own tokens.
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
         try:
-            self._fernet = Fernet(key)
+            if not lines:
+                raise ValueError("empty key file")
+            return MultiFernet([Fernet(line) for line in lines])
         except (ValueError, TypeError):
             raise TenantRegistryError("Tenant encryption key is invalid") from None
 

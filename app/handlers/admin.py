@@ -25,6 +25,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
+from app import panel_health
 from app.handlers.admin_panel import PanelDeps, register_panel_handlers
 from app.logging_setup import recent_problems
 from app.keyboards.admin import (
@@ -32,7 +33,10 @@ from app.keyboards.admin import (
     AdminCB,
     back_keyboard,
     cancel_edit_keyboard,
+    connection_keyboard,
+    diagnosis_keyboard,
     edit_status_keyboard,
+    guide_keyboard,
     main_menu_keyboard,
     persian_title,
 )
@@ -162,10 +166,14 @@ def _find_status(statuses: list[Status], key: str | None) -> Status | None:
     return next((s for s in statuses if s.key == key), None)
 
 
-def render_main_card(state: AppState, statuses: list[Status]) -> str:
+def render_main_card(
+    state: AppState, statuses: list[Status], readiness: str | None = None
+) -> str:
     active = _find_status(statuses, state.active_status_key)
     power = "🟢 فعال" if state.enabled else "🔴 غیرفعال"
     lines = ["🤖 <b>دستیار شخصی ZIKO</b>", "", f"پاسخ خودکار: {power}"]
+    if readiness:
+        lines.append(f"آمادگی: {readiness}")
 
     if active is None:
         lines.append("وضعیت فعلی: انتخاب نشده")
@@ -199,10 +207,43 @@ def create_admin_router(
     transition_lock = asyncio.Lock()
 
     # ------------------------------ rendering ------------------------------ #
+    async def diagnose() -> panel_health.Diagnosis:
+        """Evaluate every gate the reply engine applies. Read-only, a few small queries."""
+        app_state = await db.get_app_state()
+        status = await db.get_status(app_state.active_status_key) if app_state.active_status_key else None
+        stats = None
+        getter = getattr(db, "get_statistics", None)
+        if getter is not None:
+            try:
+                stats = await getter()
+            except Exception:
+                logger.warning("Statistics unavailable for diagnosis")
+        problems = recent_problems(log_path, limit=50) if log_path is not None else []
+        try:
+            exceptions_count = len(await db.list_reply_exceptions())
+        except Exception:
+            exceptions_count = 0
+        return panel_health.diagnose(
+            connection=await db.get_business_connection(), app_state=app_state, status=status,
+            owner=await db.get_owner_settings(), stats=stats, problems=problems,
+            exceptions_count=exceptions_count,
+        )
+
     async def build_menu() -> tuple[str, InlineKeyboardMarkup]:
         state = await db.get_app_state()
         statuses = await db.list_statuses()
-        return render_main_card(state, statuses), main_menu_keyboard(statuses, state)
+        try:
+            badge = (await diagnose()).badge
+        except Exception:  # the menu must always render, even if diagnosis fails
+            logger.warning("Readiness badge unavailable", exc_info=True)
+            badge = None
+        try:
+            from app.handlers.rotation_panel import availability_row
+            av_row = availability_row(await db.get_availability())
+        except Exception:
+            logger.warning("Availability switch unavailable", exc_info=True)
+            av_row = None
+        return render_main_card(state, statuses, badge), main_menu_keyboard(statuses, state, av_row)
 
     async def edit_callback_message(
         callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None
@@ -435,8 +476,36 @@ def create_admin_router(
                 lines.append("\nاتصال سالم است؛ پاسخ خودکار فعلاً خاموش است.")
             text = "\n".join(lines)
 
-        await edit_callback_message(callback, text, back_keyboard())
+        connected_ok = connection is not None and connection.is_enabled and connection.can_reply
+        await edit_callback_message(callback, text, connection_keyboard(connected_ok))
         await _safe_callback_answer(callback)
+
+    @router.callback_query(AdminCB.filter(F.action == Action.DIAG))
+    async def cb_diag(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        result = await diagnose()
+        await edit_callback_message(
+            callback, panel_health.render(result), diagnosis_keyboard(result.ready))
+        await _safe_callback_answer(callback, "بررسی شد." if result.ready else None)
+
+    @router.callback_query(AdminCB.filter(F.action == Action.GUIDE))
+    async def cb_guide(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        await edit_callback_message(callback, panel_health.CONNECT_GUIDE, guide_keyboard())
+        await _safe_callback_answer(callback)
+
+    @router.message(Command("diagnose", "doctor"))
+    async def cmd_diagnose(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        result = await diagnose()
+        await message.answer(panel_health.render(result), parse_mode=ParseMode.HTML,
+                             reply_markup=diagnosis_keyboard(result.ready))
+
+    @router.message(Command("help"))
+    async def cmd_help(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await message.answer(panel_health.CONNECT_GUIDE, parse_mode=ParseMode.HTML,
+                             reply_markup=guide_keyboard())
 
     @router.callback_query(AdminCB.filter(F.action == Action.STATS))
     async def cb_stats(callback: CallbackQuery, state: FSMContext) -> None:
@@ -446,13 +515,8 @@ def create_admin_router(
         if getter is not None:
             try:
                 stats: Mapping[str, int] = await getter()
-                rows = [
-                    f"{label}: <b>{_esc(stats[key])}</b>"
-                    for key, label in _STAT_LABELS.items()
-                    if key in stats
-                ]
-                if rows:
-                    text = "📊 <b>آمار</b>\n\n" + "\n".join(rows)
+                if any(key in stats for key in _STAT_LABELS):
+                    text = panel_health.render_stats(dict(stats))
             except Exception:
                 logger.exception("Failed to load statistics")
         await edit_callback_message(callback, text, back_keyboard())
@@ -469,6 +533,22 @@ def create_admin_router(
             log_action=log_action,
         ),
     )
+
+    # Ready-made reply library (Persian). Same AdminFilter; must precede the fallbacks.
+    from app.handlers.library import register_library_handlers
+    from app.handlers.rotation_panel import register_rotation_handlers
+    register_library_handlers(router, PanelDeps(db=db, edit=edit_callback_message,
+                                                answer=_safe_callback_answer, log_action=log_action))
+
+    class _RotationDeps:  # PanelDeps + a way to redraw the main menu after a switch
+        def __init__(self) -> None:
+            self.db, self.edit, self.answer, self.log_action = (
+                db, edit_callback_message, _safe_callback_answer, log_action)
+
+        async def refresh_menu(self, callback: CallbackQuery) -> None:
+            await show_menu_in_callback(callback)
+
+    register_rotation_handlers(router, _RotationDeps())
 
     # ------------------------------- fallbacks ----------------------------- #
     # Registered last so specific handlers (including FSM ones) win.

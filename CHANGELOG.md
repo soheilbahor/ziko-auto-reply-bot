@@ -1,3 +1,90 @@
+## [1.5.0] - 2026-11-26
+
+Upgrade notes and every behaviour change: see `docs/MIGRATION_1.5.md`.
+Test status of this release: see `docs/RELEASE_1.5.0_TEST_REPORT.md`
+(Ubuntu 24.04 staging: 588 passed, 0 failed, 10 root-only skips that pass under sudo).
+
+### Fixed before release (found in staging validation)
+- Reply library: category and page were packed into one callback field with `:`, which
+  aiogram rejects; opening any library group failed. Now a typed `LibCB(action, item, page)`;
+  library ids are validated (`[a-z0-9_.]{1,32}`, payloads stay under 64 bytes); malformed
+  or forged library buttons are answered and change nothing.
+- Child bots: "running" is set in one guarded place and only after Telegram answered
+  `getUpdates` with a healthy watchdog. Unexpected errors are logged with their exception
+  class, a redacted message and a traceback (never the token). Restart waits have a
+  0.25 s floor, so a failing bot can no longer restart in a tight loop.
+- Benchmark: `scripts/benchmark.py` now imports the app when run from the repository root,
+  reports every suite as passed / invalid / failed / not run, and exits non-zero on a
+  duplicate or missing reply (3), a crash (4) or a suite that could not run with
+  `--strict` (5). CI runs it with `--strict`.
+- Release notes now contain only the section for the tagged version.
+
+### Fixed: child bots that never answered `/start` (critical)
+- Root cause: aiogram 3.34 retries every failing `getUpdates` forever and never raises, so a
+  revoked token, a 409 polling conflict or a leftover webhook left the bot "running" while
+  receiving nothing. Measured on v1.4.3: 197 polls in 3 s, tenant not disabled, no admin notice.
+- New `app/bot_lifecycle.py`: polling watchdog, explicit states
+  (QUEUED/STARTING/RUNNING/BACKOFF/FAILED/STOPPED), English error codes, Persian owner texts.
+- Startup is verified: `getMe` must return the registered bot id, then `deleteWebhook`
+  (pending updates kept), then polling. RUNNING only after Telegram answers `getUpdates`;
+  a bot whose latest poll failed is reported `degraded`.
+- Token rejected / bot deleted / token of another bot: tenant disabled, admins told.
+  409 conflict: back off 30 s and recover, never disabled. The inner polling task is
+  always stopped on exit (no duplicate pollers).
+
+### Security
+- Token key can live outside the data directory: `ziko security move-key`
+  (`/etc/ziko-assistant/tenant-token.key`, root:ziko 0640). It is then excluded from
+  platform backups (fingerprint only). Fresh installs use this layout.
+- `ziko security rotate-key`: crash-safe re-encryption of every child-bot token (multi-key file).
+- `ziko security audit`: permissions, systemd hardening, key location/age, backups,
+  leaked tokens in logs. Read-only; exit 0/1/2.
+- Beta updates require explicit consent (`--allow-unverified` / typing `UNVERIFIED`).
+
+### Updates
+- `ziko update` (check, notes, confirm, install), `check` (exit 10 = update available),
+  `stable`, `beta`, `history`, `logs [RUN_ID]`, `verify [--record]`, `rollback [--to V] [--with-data]`.
+- `update.sh` writes a JSON update journal and an install manifest; rollback reuses the
+  updater's lock, backup, snapshot and health-check, and refuses code-only rollback over a
+  newer database schema. Release notes are stripped of terminal escape sequences.
+
+### Monitoring and CLI (English only)
+- `ziko monitor cpu|memory|disk|network|processes|database|telegram`, `ziko dashboard`,
+  `ziko health` (cron exit codes), `ziko bots status`, `ziko bots inspect BOT_ID [--probe]`.
+- Unmeasurable metrics are reported as "not measured", never estimated.
+- Telegram telemetry (latency, failures, 429s) exported to `run/telegram-status.json` (0600);
+  stale data is labelled STALE.
+- CLI child-bot views use English reason codes only; Persian stays in Telegram.
+
+### Telegram: owners
+- `/diagnose`: every reason a reply is not being sent, with a Persian fix; readiness line
+  on the main card; connection guide (`/help`) stating Telegram's real limits.
+- Ready-made reply library: 68 Persian messages, 26 categories (store, VPN shop, live
+  support, personal), preview, edit before saving, favourites, one-tap activation.
+- Safe template variables: `{name} {customer_name} {store_name} {support_name} {order_id}
+  {owner} {time} {date}`, with Persian fallbacks; an unresolved `{...}` never reaches a customer.
+- Reply rotation (random or in order, 2-30 texts) chosen after the delivery claim, so
+  at-most-once delivery is unchanged. Online/offline switch on the main menu.
+
+### Telegram: platform admins
+- `/platform` dashboard: every child bot, worst first, with one actionable reason,
+  detail screen, enable/disable with confirmation. Shared background-refreshed cache.
+- `/alerts`: proactive admin alerts (debounced, batched, rate-limited). **Off by default**
+  (`ZIKO_PLATFORM_ALERTS=1`).
+
+### Engineering
+- `scripts/benchmark.py` with regression comparison; GitHub Actions CI (pytest, ruff,
+  pip-audit, shellcheck) and release workflow, all actions pinned to full commit SHAs;
+  Dependabot. 20 new pytest files.
+- New dependency: `psutil`.
+
+## [1.4.4] - 2026-11-25
+
+### Fixed
+- Fix release version validation.
+- Synchronize the changelog with the release version.
+
+
 ## [1.4.3] - 2026-11-25
 
 ### Managed bots

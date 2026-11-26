@@ -23,7 +23,7 @@
 # Usage (as root):
 #   sudo scripts/update.sh                       # latest stable release
 #   sudo scripts/update.sh --version vX.Y.Z      # specific stable release
-#   sudo scripts/update.sh --channel beta        # latest main-branch commit (unstable)
+#   sudo scripts/update.sh --channel beta --allow-unverified  # main branch, NOT verified
 #   sudo scripts/update.sh --check               # only report versions
 #   sudo scripts/update.sh --repo OWNER/REPOSITORY
 #
@@ -72,6 +72,8 @@ STAGE_NAME="INIT"
 DB_BACKUP=""
 DB_PLAIN=""      # plaintext pre-update snapshot; cleanup() always removes it
 PLATFORM_BACKUP=""
+ROLLBACK_TO=""
+ROLLBACK_WITH_DATA=0
 CODE_SNAPSHOT=""
 UNIT_SNAPSHOT=""
 HAD_UNIT=0
@@ -82,10 +84,32 @@ STARTED_NEW=0
 ROLLING_BACK=0
 
 log()  { printf '[ziko-update] %s\n' "$*"; }
-stage(){ STAGE_NAME="$1"; log "STAGE=$1${2:+ $2}"; }
+# Machine-readable update journal (read by `ziko update history`). One JSON object per
+# line, 0600, never contains secrets. Writing it must never break an update.
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+JOURNAL=""
+journal() {
+  [[ -n "$JOURNAL" ]] || return 0
+  local stage_name="$1"; shift
+  ZJ_STAGE="$stage_name" ZJ_RUN="$RUN_ID" python3 - "$JOURNAL" "$@" <<'PYJ' 2>/dev/null || true
+import json, os, sys, time
+path, pairs = sys.argv[1], sys.argv[2:]
+event = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+         "run": os.environ["ZJ_RUN"], "stage": os.environ["ZJ_STAGE"]}
+for pair in pairs:
+    key, _, value = pair.partition("=")
+    if key.isidentifier():
+        event[key] = value[:500]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+with os.fdopen(fd, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, ensure_ascii=True) + "\n")
+PYJ
+}
+stage(){ STAGE_NAME="$1"; log "STAGE=$1${2:+ $2}"; journal "$1" ${2:+"detail=$2"}; }
 warn() { printf '[ziko-update] WARNING (stage %s): %s\n' "$STAGE_NAME" "$*" >&2; }
 die() {
   printf '[ziko-update] ERROR (stage %s): %s\n' "$STAGE_NAME" "$*" >&2
+  journal FAILED "failed_stage=$STAGE_NAME" "message=$*"
   if needs_rollback; then rollback; fi   # rollback() exits
   exit 1
 }
@@ -258,6 +282,7 @@ rollback() {
   set +e
   local failed_stage="$STAGE_NAME"
   printf '[ziko-update] ROLLBACK: failed in stage %s; restoring the previous release\n' "$failed_stage" >&2
+  journal ROLLBACK "failed_stage=$failed_stage"
   systemctl stop "$SERVICE" 2>/dev/null
   if [[ "$REPLACED" -eq 1 && -f "$CODE_SNAPSHOT" ]]; then
     clear_code
@@ -300,9 +325,119 @@ rollback() {
     systemctl start "$SERVICE" || warn "could not start $SERVICE after rollback"
   fi
   warn "rollback finished; check: systemctl status $SERVICE ; journalctl -u $SERVICE"
+  journal ROLLBACK_DONE "failed_stage=$failed_stage"
   [[ -n "$DB_BACKUP" ]] && warn "pre-update database backup: $DB_BACKUP"
   [[ -n "$PLATFORM_BACKUP" ]] && warn "pre-update platform backup: $PLATFORM_BACKUP"
   exit 1
+}
+
+# Operator-requested rollback to a pre-update code snapshot (`ziko update rollback`).
+# Reuses this script's safeguards: the lock, a fresh verified platform backup, a code
+# snapshot of the CURRENT tree (so the rollback itself can be undone), dependency
+# reinstall, service restart and the same health check. On failure it restores the
+# tree it replaced. Data is only touched with --with-data (via restore-platform.sh).
+manual_rollback() {
+  local snap="$1" name version current stamp undo
+  [[ -f "$snap" && ! -L "$snap" ]] || die "snapshot not found or is a symlink: $snap"
+  [[ "$(cd "$(dirname "$snap")" && pwd -P)" == "$(cd "$BACKUP_DIR" && pwd -P)" ]] \
+    || die "snapshot must be in $BACKUP_DIR"
+  name="$(basename "$snap")"
+  [[ "$name" =~ ^code-(v?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.-]*|unknown)-[0-9]{8}T[0-9]{6}-[0-9]+\.tar\.gz$ ]] \
+    || die "not a ZIKO code snapshot: $name"
+  version="${BASH_REMATCH[1]}"
+  current="unknown"; [[ -f "$ROOT/VERSION" ]] && current="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+  stamp="$(date -u +%Y%m%dT%H%M%S)-$$"
+  journal PLAN "kind=rollback" "from=${current#v}" "to=${version#v}" "channel=rollback"
+
+  stage ROLLBACK_VALIDATE "$name"
+  if tar -tzf "$snap" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then die "snapshot contains unsafe paths"; fi
+  mkdir "$WORK/rb"
+  tar -xzf "$snap" -C "$WORK/rb" --no-same-owner || die "snapshot cannot be extracted"
+  local f
+  for f in VERSION app/main.py app/storage.py requirements.txt pyproject.toml scripts/update.sh deploy/ziko.service; do
+    [[ -f "$WORK/rb/$f" ]] || die "snapshot is missing $f"
+  done
+  if [[ -n "$(find "$WORK/rb" \( -name '.env' -o -name '*.sqlite*' -o -type l \) -print -quit)" ]]; then
+    die "snapshot contains .env, database files or symlinks - refusing"
+  fi
+  "$ROOT/.venv/bin/python" -m compileall -q "$WORK/rb/app" >/dev/null || die "snapshot code does not compile"
+  # 1.4.x does not know ZIKO_TENANT_KEY_FILE: with an external key it would look for the key
+  # in the data directory, find none, and child bots could not start. Refuse up front.
+  if [[ ! -f "$WORK/rb/app/key_location.py" ]]; then   # key_location.py arrived in 1.5.0
+    if [[ -r "$ENV_FILE" ]] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?ZIKO_TENANT_KEY_FILE=.+' "$ENV_FILE"; then
+      die "${version#v} cannot read the external token key; run 'ziko security move-key --to-data' first"
+    fi
+  fi
+  # Older code refuses a database whose schema is newer than it knows (SchemaVersionError).
+  # Without --with-data, refuse BEFORE stopping anything if a newer release migrated it.
+  if [[ "${ROLLBACK_WITH_DATA:-0}" -ne 1 && -f "$DB_PATH" ]]; then
+    local old_schema live_schema
+    old_schema="$(sed -n 's/^SCHEMA_VERSION = \([0-9][0-9]*\)$/\1/p' "$WORK/rb/app/storage.py" | head -n1)"
+    live_schema="$("$ROOT/.venv/bin/python" -c 'import sqlite3,sys; c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True); print(c.execute("PRAGMA user_version").fetchone()[0])' "$DB_PATH")"
+    if [[ -n "$old_schema" && -n "$live_schema" && "$live_schema" -gt "$old_schema" ]]; then
+      die "database schema $live_schema is newer than ${version#v} supports ($old_schema); use --with-data to also restore the data, or update forward instead"
+    fi
+  fi
+
+  stage BACKUP_START "encrypted full-platform backup before rollback"
+  [[ -n "${ZIKO_AGE_RECIPIENT:-}" ]] || die "Set ZIKO_AGE_RECIPIENT; an encrypted backup is mandatory before a rollback."
+  local backup_output
+  backup_output="$(run_as_service_user env ZIKO_APP_DIR="$ROOT" ZIKO_ENV_FILE="$ENV_FILE" \
+    ZIKO_DB_PATH="$DB_PATH" ZIKO_BACKUP_DIR="$BACKUP_DIR" ZIKO_AGE_RECIPIENT="$ZIKO_AGE_RECIPIENT" \
+    bash "$ROOT/scripts/backup.sh" "$BACKUP_DIR")" || die "pre-rollback backup failed; nothing changed"
+  PLATFORM_BACKUP="$(printf '%s\n' "$backup_output" | sed -n 's/^Full platform backup created and verified: //p' | tail -n1)"
+  journal BACKUP_DONE "platform_backup=$PLATFORM_BACKUP"
+
+  stage CODE_SNAPSHOT "current tree, so this rollback can be undone"
+  undo="$BACKUP_DIR/code-${current}-${stamp}.tar.gz"
+  tar -czf "$undo" -C "$ROOT" --exclude=./.env --exclude=./data --exclude=./.venv --exclude=./backups .
+  chmod 600 "$undo"
+  CODE_SNAPSHOT="$undo"
+  journal CODE_SNAPSHOT_DONE "code_snapshot=$undo"
+
+  trap 'on_error $LINENO' ERR
+  stage SERVICE_STOP
+  STOPPED=1
+  systemctl stop "$SERVICE"
+  stage FILES_DEPLOY "${version#v}"
+  REPLACED=1
+  clear_code
+  cp -a "$WORK/rb/." "$ROOT/"
+  chown -R root:root "$ROOT"/app "$ROOT"/scripts "$ROOT"/deploy 2>/dev/null || true
+  stage DEPENDENCIES_INSTALL
+  DEPS_CHANGED=1
+  install_requirements "$ROOT"
+  if [[ -f "$ROOT/deploy/ziko.service" ]]; then
+    HAD_UNIT=1; UNIT_SNAPSHOT="$BACKUP_DIR/ziko.service.pre-rollback-$stamp"
+    cp -p -- "$UNIT_FILE" "$UNIT_SNAPSHOT"; chmod 600 "$UNIT_SNAPSHOT"
+    install -o root -g root -m 644 "$ROOT/deploy/ziko.service" "$UNIT_FILE"
+    systemctl daemon-reload
+  fi
+  if [[ "${ROLLBACK_WITH_DATA:-0}" -eq 1 ]]; then
+    stage DATA_RESTORE "matching platform backup"
+    local data_backup
+    data_backup="$(ls -1t "$BACKUP_DIR"/ziko-platform-*.tar.gz.age 2>/dev/null \
+      | while IFS= read -r a; do [[ "$a" == "$PLATFORM_BACKUP" ]] && continue; printf '%s\n' "$a"; break; done)"
+    [[ -n "$data_backup" ]] || die "no earlier platform backup to restore"
+    ZIKO_APP_DIR="$ROOT" ZIKO_ENV_FILE="$ENV_FILE" ZIKO_DB_PATH="$DB_PATH" ZIKO_BACKUP_DIR="$BACKUP_DIR" \
+      ZIKO_AGE_IDENTITY="$AGE_IDENTITY" bash "$ROOT/scripts/restore-platform.sh" --yes "$data_backup" \
+      || die "data restore failed"
+  fi
+  stage SERVICE_RESTART
+  STARTED_NEW=1
+  systemctl start "$SERVICE"
+  local i
+  for ((i = 0; i < HEALTH_SECONDS; i++)); do
+    sleep 1
+    systemctl is-active --quiet "$SERVICE" || die "$SERVICE is not active after rollback"
+  done
+  stage HEALTH_CHECK
+  local schema
+  schema="$(sed -n 's/^SCHEMA_VERSION = \([0-9][0-9]*\)$/\1/p' "$ROOT/app/storage.py" | head -n1)"
+  "$ROOT/.venv/bin/python" "$ROOT/scripts/verify_platform.py" health --data-dir "$(dirname "$DB_PATH")" \
+    --expected-schema "$schema" --env-file "$ENV_FILE" || die "post-rollback health check failed"
+  trap - ERR INT TERM
+  stage ROLLBACK_COMPLETE "now running ${version#v}; undo with: ziko update rollback --to ${current#v}"
 }
 
 # shellcheck disable=SC2317
@@ -319,6 +454,7 @@ cleanup() {
 on_error() {
   local code=$? line="${1:-?}"
   printf '[ziko-update] ERROR (stage %s): command failed (exit %s) at line %s\n' "$STAGE_NAME" "$code" "$line" >&2
+  journal FAILED "failed_stage=$STAGE_NAME" "message=command failed (exit $code) at line $line"
   if needs_rollback; then rollback; fi
   exit "$code"
 }
@@ -330,6 +466,9 @@ main() {
       --repo)    [[ $# -ge 2 ]] || die "--repo needs a value"; REPO="$2"; shift 2 ;;
       --channel) [[ $# -ge 2 ]] || die "--channel needs a value"; CHANNEL="$2"; shift 2 ;;
       --check)   CHECK_ONLY=1; shift ;;
+      --allow-unverified) ALLOW_UNVERIFIED=1; shift ;;
+      --rollback-to) [[ $# -ge 2 ]] || die "--rollback-to needs a snapshot path"; ROLLBACK_TO="$2"; shift 2 ;;
+      --with-data) ROLLBACK_WITH_DATA=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1 (see --help)" ;;
     esac
@@ -339,6 +478,12 @@ main() {
   [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "invalid repository: $REPO"
   [[ "$CHANNEL" == "stable" || "$CHANNEL" == "beta" || "$CHANNEL" == "dev" ]] || die "channel must be stable or beta"
   [[ "$CHANNEL" == "dev" ]] && CHANNEL="beta"
+  # Beta snapshots have no release checksum and no build attestation: refuse them unless
+  # the operator explicitly accepts unverified code. --check (read-only) is always allowed.
+  if [[ "$CHANNEL" == "beta" && "$CHECK_ONLY" -eq 0 && "${ALLOW_UNVERIFIED:-0}" -ne 1 ]]; then
+    die "beta is UNVERIFIED code (no SHA-256 release checksum, no build attestation). Re-run with --allow-unverified to accept that risk, or use --channel stable."
+  fi
+  [[ "$CHANNEL" == "beta" && "$CHECK_ONLY" -eq 0 ]] && log "WARNING: installing UNVERIFIED beta code by explicit operator request"
   [[ "$REPO" != "OWNER/REPOSITORY" ]] || die "set the real repository: --repo <owner>/<repo> or ZIKO_REPO"
   local cmd
   for cmd in curl tar sha256sum systemctl runuser flock install age; do
@@ -357,6 +502,18 @@ main() {
   WORK="$(mktemp -d)"
   trap cleanup EXIT
 
+  if [[ -n "${ROLLBACK_TO:-}" ]]; then
+    install -d -m 700 "$(dirname "$DB_PATH")/run" 2>/dev/null \
+      && JOURNAL="$(dirname "$DB_PATH")/run/update-journal.jsonl"
+    manual_rollback "$ROLLBACK_TO"
+    exit 0
+  fi
+
+  # The journal lives next to the data (service-owned dir, but written by root here).
+  if [[ "$CHECK_ONLY" -eq 0 ]]; then
+    install -d -m 700 "$(dirname "$DB_PATH")/run" 2>/dev/null \
+      && JOURNAL="$(dirname "$DB_PATH")/run/update-journal.jsonl"
+  fi
   stage UPDATE_START
   stage RESOLVE
   local BETA_SHA=""
@@ -373,6 +530,7 @@ main() {
   current="${current#v}"
   local target_version="${TAG#v}"
   log "installed: $current   target: $target_version   channel: $CHANNEL"
+  journal PLAN "from=$current" "to=$target_version" "channel=$CHANNEL"
   if [[ "$CHECK_ONLY" -eq 1 ]]; then exit 0; fi
   if [[ "$current" == "$target_version" ]]; then log "already up to date"; exit 0; fi
 
@@ -483,6 +641,7 @@ PY
     sed -n 's/^Full platform backup created and verified: //p' | tail -n1)"
   [[ -n "$PLATFORM_BACKUP" && -f "$PLATFORM_BACKUP.sha256" ]] \
     || die "full-platform backup was not published; update cancelled"
+  journal BACKUP_DONE "platform_backup=$PLATFORM_BACKUP"
 
   stage BACKUP_VERIFY "platform archive"
   verify_platform_archive "$PLATFORM_BACKUP"
@@ -531,6 +690,7 @@ PY
   tar -czf "$CODE_SNAPSHOT" -C "$ROOT" \
     --exclude=./.env --exclude=./data --exclude=./.venv --exclude=./backups .
   chmod 600 "$CODE_SNAPSHOT"
+  journal CODE_SNAPSHOT_DONE "code_snapshot=$CODE_SNAPSHOT"
 
   stage DATABASE_MIGRATION "dry-run on copies"
   dry_run_migrations
@@ -552,6 +712,14 @@ PY
     die "installed files differ from the verified release"
   fi
   log "installed tree matches the verified release"
+  # Record what was installed, so `ziko update verify` can detect later tampering or drift.
+  "$ROOT/.venv/bin/python" - "$ROOT" "$target_version" <<'PYM' || warn "could not write the install manifest"
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from app.updates import write_manifest
+write_manifest(Path(sys.argv[1]), sys.argv[2])
+PYM
 
   stage UNIT_INSTALL
   HAD_UNIT=1

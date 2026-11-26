@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram.types import ReplyParameters
 
+from app import templates
 from app.logging_setup import set_stage
 from app.models import DeliveryOutcome, OwnerSettings, ReplyStep
 
@@ -221,6 +222,17 @@ class BusinessMessageEngine:
         steps = await self.db.list_reply_steps(status.key)
         if not steps:
             steps = [ReplyStep(1, "text", status.reply_text)]
+        # Rotation (v1.5): chosen only now, after the claim, so a duplicate update can never
+        # advance the sequence or change which variant this contact receives.
+        picker = getattr(self.db, "next_reply_variant", None)
+        if picker is not None:
+            try:
+                variant = await picker(status.key)
+            except Exception:
+                logger.warning("Reply rotation unavailable; using the status reply", exc_info=True)
+                variant = None
+            if variant:
+                steps = [ReplyStep(1, "text", variant)]
         context = _template_context(message, owner, now)
         reply_to = int(message.message_id) if status.reply_mode == "reply" else None
         delivered = 0
@@ -268,21 +280,29 @@ class BusinessMessageEngine:
 
 
 def render_template(content: str, context: dict[str, str]) -> str:
-    """Fill {name}, {time}, {date} and {owner}. Unknown braces stay as written.
+    """Fill reply variables via app.templates (single pass, safe fallbacks).
 
-    Single pass: a value that contains braces is never expanded again.
+    v1.5: unknown or empty variables use a Persian fallback, and nothing shaped like
+    ``{...}`` is ever sent to a customer. v1.4 variables behave exactly as before.
     """
-    return _PLACEHOLDER.sub(lambda match: context[match.group(1)], content)
+    return templates.render(content, context)
 
 
 def _template_context(message: Any, owner: OwnerSettings, now_utc: datetime) -> dict[str, str]:
     local = now_utc.astimezone(ZoneInfo(owner.timezone))
     first_name = str(getattr(getattr(message, "from_user", None), "first_name", "") or "").strip()
+    # The customer's text is used ONLY to spot an order number they typed; it is never
+    # stored or logged (privacy rule of this module).
+    text = getattr(message, "text", None) or getattr(message, "caption", None)
     return {
         "name": first_name[:64] or DEFAULT_CONTACT_NAME,
+        "customer_name": first_name[:64],
         "time": local.strftime("%H:%M"),
         "date": local.strftime("%Y-%m-%d"),
         "owner": owner.owner_name,
+        "store_name": owner.owner_name,
+        "support_name": owner.owner_name,
+        "order_id": templates.extract_order_id(text if isinstance(text, str) else None),
     }
 
 

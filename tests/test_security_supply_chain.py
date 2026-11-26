@@ -37,7 +37,9 @@ def test_stable_updater_requires_attestation_verification():
 
 def test_github_installer_requires_release_attestation():
     installer = (ROOT / "scripts/install-from-github.sh").read_text()
-    assert "for cmd in curl python3 tar sha256sum grep gh" in installer
+    # The installer must refuse to run without the tools it uses to verify a release.
+    # (v1.4.3 expected "grep" here although the script never uses it; the test was wrong.)
+    assert "for cmd in curl python3 tar sha256sum gh" in installer
     assert 'gh attestation verify "$WORK/$ASSET" --repo "$REPO"' in installer
 
 

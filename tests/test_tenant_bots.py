@@ -124,6 +124,11 @@ async def test_poller_slots_report_running_and_waiting_states(
     release = asyncio.Event()
 
     async def hold_polling(tenant):
+        # Simulate what real polling does: Telegram answers getUpdates, the watchdog records
+        # it, and only then the supervisor confirms the bot. A held slot alone is not enough.
+        watchdog = manager._attach_watchdog(tenant.bot_id)
+        watchdog.ok()
+        assert manager._confirm_polling(tenant.bot_id, watchdog)
         entered[tenant.bot_id].set()
         await release.wait()
 

@@ -46,6 +46,9 @@ class Action:
     EXC = "exc"
     EXC_ADD = "excadd"
     EXC_DEL = "excdel"
+    # Owner-UX additions: diagnosis, connection guide.
+    DIAG = "diag"
+    GUIDE = "guide"
 
 
 class AdminCB(CallbackData, prefix="adm"):
@@ -71,10 +74,13 @@ def _btn(text: str, action: str, key: str = "") -> InlineKeyboardButton:
 
 
 def main_menu_keyboard(
-    statuses: Sequence[Status], state: AppState
+    statuses: Sequence[Status], state: AppState,
+    availability_row: list[InlineKeyboardButton] | None = None,
 ) -> InlineKeyboardMarkup:
-    """Main menu: six status buttons, power toggle, edit, connection, stats."""
+    """Main menu: online/offline switch (if set up), status buttons, power, tools."""
     rows: list[list[InlineKeyboardButton]] = []
+    if availability_row:
+        rows.append(availability_row)
 
     status_buttons: list[InlineKeyboardButton] = []
     for status in statuses:
@@ -91,6 +97,7 @@ def main_menu_keyboard(
         rows.append([_btn("▶️ فعال‌سازی پاسخ خودکار", Action.ENABLE)])
 
     rows.append([_btn("✏️ ویرایش متن پاسخ‌ها", Action.EDIT_MENU)])
+    rows.append([_btn("📚 پیام‌های آماده", "lib"), _btn("🩺 عیب‌یابی", Action.DIAG)])
     rows.append(
         [
             _btn("🔌 وضعیت اتصال", Action.CONNECTION),
@@ -128,6 +135,29 @@ def confirm_text_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def diagnosis_keyboard(ready: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if not ready:
+        rows.append([_btn("📘 راهنمای اتصال", Action.GUIDE)])
+    rows.append([_btn("🔄 بررسی دوباره", Action.DIAG)])
+    rows.append([_btn("🔙 بازگشت به منو", Action.MENU)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def guide_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("🔄 اتصال را انجام دادم؛ بررسی کن", Action.DIAG)],
+        [_btn("🔙 بازگشت به منو", Action.MENU)],
+    ])
+
+
+def connection_keyboard(connected_ok: bool) -> InlineKeyboardMarkup:
+    rows = [] if connected_ok else [[_btn("📘 راهنمای اتصال", Action.GUIDE)]]
+    rows.append([_btn("🩺 عیب‌یابی کامل", Action.DIAG), _btn("🔄 بررسی دوباره", Action.CONNECTION)])
+    rows.append([_btn("🔙 بازگشت به منو", Action.MENU)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_btn("🔙 بازگشت به منو", Action.MENU)]])
 
@@ -140,6 +170,8 @@ def _markup(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
 def panel_menu_keyboard() -> InlineKeyboardMarkup:
     return _markup(
         [
+            [_btn("📚 کتابخانه پیام‌های آماده", "lib")],
+            [_btn("🟢🌙 حالت آنلاین / آفلاین", "av")],
             [_btn("🧩 مدیریت وضعیت‌ها", Action.ST_LIST)],
             [_btn("➕ افزودن وضعیت", Action.ST_NEW)],
             [_btn("👤 تنظیمات مالک", Action.OWNER)],
@@ -163,6 +195,7 @@ def status_view_keyboard(key: str) -> InlineKeyboardMarkup:
         [
             [_btn("✏️ ویرایش عنوان", Action.ST_TITLE, key), _btn("🔤 ویرایش ایموجی", Action.ST_EMOJI, key)],
             [_btn("🧩 ویرایش بخش‌های پاسخ", Action.ST_STEPS, key)],
+            [_btn("🔁 چرخش پیام (چند متن)", "rot", key)],
             [_btn("⚙️ سیاست پاسخ", Action.ST_POLICY, key)],
             [_btn("🗑 حذف وضعیت", Action.ST_DEL, key)],
             [_btn("🔙 بازگشت", Action.ST_LIST)],

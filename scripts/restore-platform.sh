@@ -29,7 +29,18 @@ DB="${ZIKO_DB_PATH:-${DB:-/var/lib/ziko-assistant/ziko.sqlite3}}"
 [[ "$DB" == /* ]] || DB="$APP_DIR/$DB"
 DATA_DIR="$(dirname "$DB")"
 REGISTRY_DB="$DATA_DIR/tenants.sqlite3"
-TENANT_KEY="$DATA_DIR/tenant-token.key"
+# Token-key location: ZIKO_TENANT_KEY_FILE from the environment or ziko.env, else legacy.
+TENANT_KEY_EXTERNAL=0
+TENANT_KEY="${ZIKO_TENANT_KEY_FILE:-}"
+if [[ -z "$TENANT_KEY" && -r "$ENV_FILE" ]]; then
+  TENANT_KEY="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?ZIKO_TENANT_KEY_FILE=\(.*\)$/\2/p' "$ENV_FILE" | tail -n1 | tr -d "\"'")"
+fi
+if [[ -n "$TENANT_KEY" && "$TENANT_KEY" != "$DATA_DIR/tenant-token.key" ]]; then
+  [[ "$TENANT_KEY" == /* ]] || die "ZIKO_TENANT_KEY_FILE must be an absolute path."
+  TENANT_KEY_EXTERNAL=1
+else
+  TENANT_KEY="$DATA_DIR/tenant-token.key"
+fi
 TENANT_DIR="$DATA_DIR/tenants"
 PY="$APP_DIR/.venv/bin/python"
 [[ -x "$PY" ]] || die "Application Python environment missing: $PY"
@@ -58,7 +69,10 @@ rollback(){
     systemctl stop "$SERVICE" >/dev/null 2>&1
     if [[ -e "$PREVIOUS/main.sqlite3" ]]; then rm -f -- "$DB"; mv -- "$PREVIOUS/main.sqlite3" "$DB"; elif [[ "$HAD_DB" -eq 0 ]]; then rm -f -- "$DB"; fi
     if [[ -e "$PREVIOUS/registry.sqlite3" ]]; then rm -f -- "$REGISTRY_DB"; mv -- "$PREVIOUS/registry.sqlite3" "$REGISTRY_DB"; elif [[ "$HAD_REGISTRY" -eq 0 ]]; then rm -f -- "$REGISTRY_DB"; fi
-    if [[ -e "$PREVIOUS/tenant-token.key" ]]; then rm -f -- "$TENANT_KEY"; mv -- "$PREVIOUS/tenant-token.key" "$TENANT_KEY"; elif [[ "$HAD_KEY" -eq 0 ]]; then rm -f -- "$TENANT_KEY"; fi
+    # An external key is never touched by restore, so rollback must not touch it either.
+    if [[ "$TENANT_KEY_EXTERNAL" -eq 0 ]]; then
+      if [[ -e "$PREVIOUS/tenant-token.key" ]]; then rm -f -- "$TENANT_KEY"; mv -- "$PREVIOUS/tenant-token.key" "$TENANT_KEY"; elif [[ "$HAD_KEY" -eq 0 ]]; then rm -f -- "$TENANT_KEY"; fi
+    fi
     if [[ -e "$PREVIOUS/tenants" ]]; then rm -rf -- "$TENANT_DIR"; mv -- "$PREVIOUS/tenants" "$TENANT_DIR"; elif [[ "$HAD_TENANTS" -eq 0 ]]; then rm -rf -- "$TENANT_DIR"; fi
   fi
   if [[ "$WAS_ACTIVE" -eq 1 ]]; then systemctl start "$SERVICE" || echo "WARNING: previous platform data restored but service did not restart." >&2; fi
@@ -113,10 +127,10 @@ if not (destination / "manifest.json").is_file(): raise SystemExit("Platform arc
 PYCODE
 # Every extracted file must match the SHA-256 recorded when the archive was created.
 "$PY" "$SCRIPT_DIR/verify_platform.py" manifest "$STAGE" || die "Platform archive failed manifest verification; nothing was changed."
-"$PY" - "$STAGE" <<'PYCODE'
+ZIKO_KEY_EXTERNAL="$TENANT_KEY_EXTERNAL" ZIKO_TENANT_KEY_FILE_RESOLVED="$TENANT_KEY" "$PY" - "$STAGE" <<'PYCODE'
 import sqlite3, sys
 from pathlib import Path
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 stage = Path(sys.argv[1])
 def check_db(path):
     with path.open("rb") as stream:
@@ -127,13 +141,29 @@ def check_db(path):
         if db.execute("PRAGMA foreign_key_check").fetchall(): raise SystemExit(f"SQLite foreign-key check failed: {path.name}")
     finally: db.close()
 for path in [stage / "main.sqlite3", *sorted((stage / "tenants").glob("*.sqlite3"))]: check_db(path)
+import json, os
+external = os.environ.get("ZIKO_KEY_EXTERNAL") == "1"
 registry, key_path = stage / "registry.sqlite3", stage / "tenant-token.key"
+manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
+recorded = (manifest.get("tenant_key") or {}).get("sha256")
+if external:
+    if key_path.exists():
+        raise SystemExit("Archive contains a key, but this server keeps the key outside the data directory. "
+                         "Move the key back first (ziko security move-key --to-data) or restore it manually.")
+    key_path = Path(os.environ["ZIKO_TENANT_KEY_FILE_RESOLVED"])
+    if registry.exists() and recorded and key_path.is_file():
+        import hashlib
+        if hashlib.sha256(key_path.read_bytes()).hexdigest() != recorded:
+            print("WARNING: the current key file is not the one recorded in this backup; "
+                  "checking whether it still decrypts every token...")
 tenant_files = list((stage / "tenants").glob("*.sqlite3"))
 if tenant_files and not registry.exists():
     raise SystemExit("Tenant databases are present but the tenant registry is missing")
 if registry.exists():
-    if not key_path.is_file(): raise SystemExit("Tenant registry exists but encryption key is missing")
-    try: fernet = Fernet(key_path.read_bytes())
+    if not key_path.is_file(): raise SystemExit(
+        "Tenant registry exists but encryption key is missing"
+        + (f" (expected the separately kept key at {key_path})" if external else ""))
+    try: fernet = MultiFernet([Fernet(k) for k in key_path.read_bytes().split() if k])
     except (ValueError, TypeError): raise SystemExit("Tenant encryption key is invalid") from None
     db = sqlite3.connect(f"file:{registry}?mode=ro", uri=True)
     try:
@@ -144,7 +174,12 @@ if registry.exists():
 elif key_path.exists(): raise SystemExit("Archive contains a tenant key but no tenant registry")
 PYCODE
 if [[ "$YES" -eq 0 ]]; then
-  echo "This replaces the main database and all child-bot registry/key/database files."
+  if [[ "$TENANT_KEY_EXTERNAL" -eq 1 ]]; then
+    echo "This replaces the main database and all child-bot registry/database files."
+    echo "The external token key ($TENANT_KEY) is kept unchanged."
+  else
+    echo "This replaces the main database and all child-bot registry/key/database files."
+  fi
   read -r -p "Type RESTORE PLATFORM to continue: " answer </dev/tty
   [[ "$answer" == "RESTORE PLATFORM" ]] || die "Cancelled; live data unchanged."
 fi
@@ -165,7 +200,7 @@ for raw in sys.argv[1:]:
 PYCODE
 [[ -e "$DB" ]] && HAD_DB=1
 [[ -e "$REGISTRY_DB" ]] && HAD_REGISTRY=1
-[[ -e "$TENANT_KEY" ]] && HAD_KEY=1
+[[ "$TENANT_KEY_EXTERNAL" -eq 0 && -e "$TENANT_KEY" ]] && HAD_KEY=1
 [[ -e "$TENANT_DIR" ]] && HAD_TENANTS=1
 SWAPPED=1
 [[ "$HAD_DB" -eq 0 ]] || mv -- "$DB" "$PREVIOUS/main.sqlite3"
@@ -176,7 +211,7 @@ rm -f -- "$REGISTRY_DB-wal" "$REGISTRY_DB-shm" "$REGISTRY_DB-journal"
 [[ "$HAD_TENANTS" -eq 0 ]] || mv -- "$TENANT_DIR" "$PREVIOUS/tenants"
 install -o "$APP_USER" -g "$APP_GROUP" -m 600 "$STAGE/main.sqlite3" "$DB"
 if [[ -f "$STAGE/registry.sqlite3" ]]; then install -o "$APP_USER" -g "$APP_GROUP" -m 600 "$STAGE/registry.sqlite3" "$REGISTRY_DB"; fi
-if [[ -f "$STAGE/tenant-token.key" ]]; then install -o "$APP_USER" -g "$APP_GROUP" -m 600 "$STAGE/tenant-token.key" "$TENANT_KEY"; fi
+if [[ "$TENANT_KEY_EXTERNAL" -eq 0 && -f "$STAGE/tenant-token.key" ]]; then install -o "$APP_USER" -g "$APP_GROUP" -m 600 "$STAGE/tenant-token.key" "$TENANT_KEY"; fi
 if [[ -d "$STAGE/tenants" ]]; then
   install -d -o "$APP_USER" -g "$APP_GROUP" -m 700 "$TENANT_DIR"
   while IFS= read -r -d '' file; do install -o "$APP_USER" -g "$APP_GROUP" -m 600 "$file" "$TENANT_DIR/$(basename "$file")"; done < <(find "$STAGE/tenants" -maxdepth 1 -type f -name '*.sqlite3' -print0)

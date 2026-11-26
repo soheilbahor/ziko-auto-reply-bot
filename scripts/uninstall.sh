@@ -148,6 +148,22 @@ if [[ -d "$BIN_DIR" ]]; then
   done
 fi
 rm_tree "$APP_DIR"
+# An external token key lives in $CONF_DIR. If the data is kept, the key must survive,
+# otherwise every stored child-bot token becomes undecryptable: move it next to the data.
+if [[ "$DB_DECISION" != "delete" && -f "$CONF_DIR/tenant-token.key" && ! -L "$CONF_DIR/tenant-token.key" ]]; then
+  if [[ -e "$DATA_DIR/tenant-token.key" ]]; then
+    if ! cmp -s "$CONF_DIR/tenant-token.key" "$DATA_DIR/tenant-token.key"; then
+      kept="$DATA_DIR/tenant-token.key.from-config-$(date -u +%Y%m%dT%H%M%SZ)"
+      install -m 600 "$CONF_DIR/tenant-token.key" "$kept"
+      chown "$SERVICE_USER:$SERVICE_USER" "$kept" 2>/dev/null || true
+      log "WARNING: two different token keys found; the external one was kept as $kept"
+    fi
+  else
+    install -m 600 "$CONF_DIR/tenant-token.key" "$DATA_DIR/tenant-token.key"
+    chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR/tenant-token.key" 2>/dev/null || true
+    log "token key moved to $DATA_DIR/tenant-token.key so the kept child-bot data stays usable"
+  fi
+fi
 rm_tree "$CONF_DIR"
 rm_tree "$BACKUP_DIR"
 log "program, configuration and backups removed"
@@ -168,6 +184,7 @@ if [[ "$DB_DECISION" == "delete" ]]; then
   log "database and all ZIKO data DELETED, user '$SERVICE_USER' removed"
 else
   log "database KEPT: $DATA_DIR (main database, child-bot databases, registry and key)"
+  log "on reinstall the key is used from the data directory; run 'ziko security move-key' to move it out again"
   log "the '$SERVICE_USER' user was kept because it owns that directory"
   log "reinstalling needs the configuration again (BOT_TOKEN, ADMIN_IDS, ...); it was removed"
 fi

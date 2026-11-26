@@ -171,8 +171,11 @@ def test_policy_values_are_validated(tmp_path: Path) -> None:
 def test_render_template_fills_known_fields_only() -> None:
     context = {"name": "Ali", "time": "10:30", "date": "2026-11-25", "owner": "{name}"}
     assert render_template("سلام {name}، ساعت {time}", context) == "سلام Ali، ساعت 10:30"
-    # Unknown braces stay, and a value containing braces is never expanded again.
-    assert render_template("{foo} {owner}", context) == "{foo} {name}"
+    # v1.5 behaviour change: an unresolved placeholder never reaches a customer, and a
+    # value containing braces is still never expanded again (it is dropped, not filled).
+    # v1.4 sent "{foo} {name}" here verbatim.
+    rendered = render_template("{foo} {owner}", context)
+    assert "{" not in rendered and "Ali" not in rendered
 
 
 # --------------------------------------------------------------------------- #

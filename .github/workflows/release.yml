@@ -1,128 +1,84 @@
-name: Release
+# Release: build the archive, publish SHA256SUMS, attest build provenance.
+# scripts/update.sh and scripts/install-from-github.sh refuse any archive whose
+# checksum or attestation (gh attestation verify) does not match.
+name: release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*.*.*"]
 
 permissions:
   contents: read
 
 jobs:
   verify:
+    name: tests before release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-      - name: Check tag format
-        run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
-            || { echo "::error::Tag '$GITHUB_REF_NAME' is not vMAJOR.MINOR.PATCH[-suffix]"; exit 1; }
-      - name: Verify canonical version source matches release tag
-        run: python scripts/check_version.py --tag "$GITHUB_REF_NAME"
       - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Tag matches VERSION
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
-          pip install "ruff==0.16.9"
-          pip-audit -r requirements-dev.txt
-      - name: Ruff (syntax / undefined names)
-        run: ruff check . --select E9,F63,F7,F82
-      - name: Shell syntax
-        run: |
-          bash -n install.sh
-          for f in scripts/*.sh; do bash -n "$f"; done
+          version="$(tr -d '[:space:]' < VERSION)"
+          [ "v${version#v}" = "${GITHUB_REF_NAME}" ] || { echo "tag $GITHUB_REF_NAME != VERSION $version"; exit 1; }
+      - name: Tests
+        run: python -m pytest -q -ra
+      - name: Dependency audit
+        run: pip-audit -r requirements-dev.txt --strict --progress-spinner off
 
-  release:
+  build:
+    name: build, checksum, attest, publish
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment: release        # add required reviewers in repo settings
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: write           # create the GitHub Release
+      id-token: write           # OIDC for the attestation
+      attestations: write       # store the attestation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Build assets
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build reproducible archive
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          VERSION="$GITHUB_REF_NAME"
-          NAME="ziko-assistant-${VERSION}"
+          name="ziko-assistant-${TAG}"
           mkdir -p dist
-          git archive --format=tar --prefix="${NAME}/" "$GITHUB_SHA" | tar -x -C dist
-          rm -rf "dist/${NAME}/.github"
-          ARCHIVE_VERSION="$(tr -d '[:space:]' < "dist/${NAME}/VERSION")"
-          [[ "$ARCHIVE_VERSION" == "${VERSION#v}" ]] || { echo "::error::archive VERSION does not match release tag"; exit 1; }
-          for f in app/main.py requirements.txt scripts/update.sh scripts/restore-platform.sh; do
-            test -f "dist/${NAME}/${f}" || { echo "::error::missing ${f}"; exit 1; }
-          done
-          if find "dist/${NAME}" \( -name '.env' -o -name '*.sqlite*' -o -name '*.db' \) | grep -q .; then
-            echo "::error::release tree contains .env or database files"; exit 1
-          fi
-          MTIME="$(git show -s --format=%ct "$GITHUB_SHA")"
-          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${MTIME}" \
-              -cf - -C dist "$NAME" | gzip -n -9 > "dist/${NAME}.tar.gz"
-          (cd dist && zip -qrX "${NAME}.zip" "$NAME")
-          (cd dist && sha256sum "${NAME}.tar.gz" "${NAME}.zip" > SHA256SUMS && cat SHA256SUMS)
-
-      - name: Verify built archives before publishing
-        run: |
-          set -euo pipefail
-          NAME="ziko-assistant-${GITHUB_REF_NAME}"
-          for fmt in .tar.gz .zip; do
-            python3 scripts/release_asset.py verify --file "dist/${NAME}${fmt}" \
-              --sums dist/SHA256SUMS --asset "${NAME}${fmt}" --tag "$GITHUB_REF_NAME"
-          done
-
-      - name: Attest release archives (SLSA provenance)
+          # git archive is deterministic for a given commit (file order, modes, mtime = commit
+          # time); gzip -n drops the gzip timestamp. Paths marked export-ignore in
+          # .gitattributes (tests, CI config) are left out.
+          git archive --format=tar --prefix="${name}/" HEAD | gzip -n -9 > "dist/${name}.tar.gz"
+          ( cd dist && sha256sum "${name}.tar.gz" > SHA256SUMS )
+          # Same checks the updater runs on a server: layout, required files, no .env/db, VERSION.
+          python scripts/release_asset.py verify --file "dist/${name}.tar.gz" \
+            --sums dist/SHA256SUMS --asset "${name}.tar.gz" --tag "$TAG"
+          cat dist/SHA256SUMS
+      - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: |
-            dist/*.tar.gz
-            dist/*.zip
-
-      - name: Release notes
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          awk -v v="$VERSION" '
-            $0 ~ "^## \\[" v "\\]" {f=1; next}
-            f && /^## \[/ {exit}
-            f {print}
-          ' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then echo "Release ${GITHUB_REF_NAME}" > notes.md; fi
-
-      - name: Create GitHub release
+          subject-path: dist/*.tar.gz
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          NAME="ziko-assistant-${GITHUB_REF_NAME}"
-          flags=()
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" \
-              "dist/${NAME}.tar.gz" "dist/${NAME}.zip" dist/SHA256SUMS --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              "dist/${NAME}.tar.gz" "dist/${NAME}.zip" dist/SHA256SUMS \
-              --title "ZIKO ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag "${flags[@]}"
-          fi
-
-      - name: Verify the published release through the GitHub API
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Fails the workflow when the release has no archive, a wrong name,
-          # a checksum mismatch or a broken archive, as an installer would see it.
-          python3 scripts/release_asset.py verify-release \
-            --api "https://api.github.com" --repo "$GITHUB_REPOSITORY" \
-            --tag "$GITHUB_REF_NAME" --workdir published
+          # Release notes = only this version's CHANGELOG section (not the whole history).
+          awk -v v="${TAG#v}" 'index($0, "## [") == 1 { p = (index($0, "## [" v "]") == 1) } p' \
+            CHANGELOG.md > release-notes.md
+          test -s release-notes.md || { echo "no CHANGELOG section for $TAG"; exit 1; }
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+            --title "$TAG" --notes-file release-notes.md --verify-tag

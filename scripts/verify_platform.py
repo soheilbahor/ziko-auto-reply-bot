@@ -51,6 +51,13 @@ def verify_manifest(directory: Path) -> list[str]:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [f"{MANIFEST_NAME} is unreadable: {type(exc).__name__}"]
+    tenant_key = manifest.get("tenant_key")
+    if tenant_key is not None and (not isinstance(tenant_key, dict)
+                                   or tenant_key.get("location") != "external"
+                                   or not re.fullmatch(r"[0-9a-f]{64}", str(tenant_key.get("sha256", "")))):
+        problems.append("malformed tenant_key entry in manifest")
+    if tenant_key is not None and (directory / "tenant-token.key").exists():
+        problems.append("archive claims an external key but also contains tenant-token.key")
     if manifest.get("format") != MANIFEST_FORMAT:
         problems.append(f"unsupported manifest format: {manifest.get('format')!r}")
     listed = manifest.get("files")
@@ -151,6 +158,15 @@ def run_health(args: argparse.Namespace) -> int:
     main_db = data / "ziko.sqlite3"
     registry_db = data / "tenants.sqlite3"
     key_file = data / "tenant-token.key"
+    import os
+    configured = os.environ.get("ZIKO_TENANT_KEY_FILE", "").strip()
+    if not configured and getattr(args, "env_file", None):
+        try:
+            configured = _read_env(Path(args.env_file)).get("ZIKO_TENANT_KEY_FILE", "").strip()
+        except OSError:
+            configured = ""
+    if configured:
+        key_file = Path(configured)
     tenants_dir = data / "tenants"
 
     if not main_db.is_file():
@@ -174,8 +190,8 @@ def run_health(args: argparse.Namespace) -> int:
             report.fail("tenant key", "missing although the registry exists")
         else:
             try:
-                from cryptography.fernet import Fernet, InvalidToken
-                fernet = Fernet(key_file.read_bytes())
+                from cryptography.fernet import Fernet, InvalidToken, MultiFernet
+                fernet = MultiFernet([Fernet(k) for k in key_file.read_bytes().split() if k])
                 conn = sqlite3.connect(f"file:{registry_db}?mode=ro", uri=True, timeout=10)
                 try:
                     rows = conn.execute(

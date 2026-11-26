@@ -712,6 +712,7 @@ def cmd_update(
     version: str | None = None,
     channel: str = "stable",
     check: bool = False,
+    allow_unverified: bool = False,
 ) -> int:
     ui = _ui()
     script = _script("update.sh")
@@ -725,6 +726,13 @@ def cmd_update(
     command = ["bash", str(script), "--channel", channel, "--repo", repo or GITHUB_REPO]
     if version:
         command += ["--version", version]
+    if channel == "beta" and not check:
+        if not allow_unverified:
+            ui.warn("Beta builds are NOT verified: no release checksum and no build attestation.")
+            if not sys.stdin.isatty() or ui.ask("Type UNVERIFIED to install anyway") != "UNVERIFIED":
+                ui.info("Cancelled. Nothing was changed.")
+                return 1
+        command.append("--allow-unverified")
     if check:
         command.append("--check")
         return _inherit(_privileged(command))
@@ -1106,6 +1114,43 @@ def cmd_help() -> int:
 
 
 # ---------------------------------------------------------------------------- parser
+def _update_dispatch(args: argparse.Namespace) -> int:
+    from app import cli_updates
+    action = args.action
+    if action is None and (args.check or args.version or args.channel != "stable"):
+        action = "legacy"  # pre-1.5 flags: ziko update --check / --version / --channel
+    try:
+        installed = resolve_installed_version()
+    except RuntimeError as exc:
+        print(f"Cannot read the installed version: {exc}", file=sys.stderr)
+        return 1
+    repo = args.repo or GITHUB_REPO
+    values, _problem = _read_env()
+    paths = cli_updates.default_paths(_db_path(values))
+    if action == "legacy":
+        return cmd_update(args.yes, args.repo, args.version, args.channel, args.check, args.allow_unverified)
+    if action is None:
+        return cli_updates.cmd_interactive(
+            installed=installed, repo=repo, yes=args.yes,
+            run_update=lambda channel: cmd_update(True, args.repo, None, channel, False, False))
+    if action == "check":
+        return cli_updates.cmd_check(installed=installed, repo=repo, as_json=args.json)
+    if action == "stable":
+        return cmd_update(args.yes, args.repo, args.version, "stable", False, False)
+    if action == "beta":
+        return cmd_update(args.yes, args.repo, None, "beta", False, args.allow_unverified)
+    if action == "history":
+        return cli_updates.cmd_history(data_dir=paths["data_dir"], as_json=args.json)
+    if action == "logs":
+        return cli_updates.cmd_logs(data_dir=paths["data_dir"], run_id=args.run_id, as_json=args.json)
+    if action == "verify":
+        return cli_updates.cmd_verify(root=HOME, record=args.record, as_json=args.json)
+    if action == "rollback":
+        return cli_updates.cmd_rollback(root=HOME, backup_dir=paths["backup_dir"], installed=installed,
+                                        target=args.to, with_data=args.with_data, yes=args.yes)
+    return 2
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ziko",
@@ -1124,16 +1169,47 @@ def _build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--bot", type=int, metavar="BOT_ID", help="Read one child bot's log file")
     logs.add_argument("--level", choices=["WARNING", "ERROR", "CRITICAL"],
                       help="With --master or --bot: only lines at this level or above")
-    upd = sub.add_parser("update", help="Update (scripts/update.sh)")
+    upd = sub.add_parser("update", help="Check, install, verify and roll back releases",
+                         description="Without ACTION: check for a stable release, show its notes and "
+                                     "install it after confirmation.")
+    upd.add_argument("action", nargs="?", choices=("check", "stable", "beta", "history", "rollback",
+                                                   "verify", "logs"),
+                     help="check | stable | beta | history | rollback | verify | logs")
+    upd.add_argument("run_id", nargs="?", help="with 'logs': a run id from 'ziko update history'")
+    upd.add_argument("--json", action="store_true", help="Machine-readable output (check, history, verify, logs)")
+    upd.add_argument("--to", metavar="VERSION", help="with 'rollback': a specific earlier version")
+    upd.add_argument("--with-data", action="store_true",
+                     help="with 'rollback': also restore databases from the matching backup (newer data is lost)")
+    upd.add_argument("--record", action="store_true",
+                     help="with 'verify': record a manifest for an install made before v1.5.0")
     upd.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     upd.add_argument("--repo", help="GitHub repository in OWNER/REPOSITORY format")
     upd.add_argument("--version", help="Release tag, e.g. vX.Y.Z")
     upd.add_argument("--channel", choices=("stable", "beta", "dev"), default="stable",
                      help="Stable release or latest main-branch beta")
     upd.add_argument("--check", action="store_true", help="Check the selected channel without updating")
+    upd.add_argument("--allow-unverified", action="store_true",
+                     help="Required for beta: accept code with no checksum or build attestation")
+    sec = sub.add_parser("security", help="Security audit and key management")
+    sec_sub = sec.add_subparsers(dest="security_command", metavar="ACTION")
+    sa = sec_sub.add_parser("audit", help="Read-only audit: permissions, hardening, keys, backups, leaked tokens")
+    sa.add_argument("--json", action="store_true", help="Machine-readable output")
+    rk = sec_sub.add_parser("rotate-key", help="Re-encrypt all child-bot tokens with a new key (service must be stopped)")
+    rk.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    mk = sec_sub.add_parser("move-key", help="Move the token key to /etc/ziko-assistant (out of data and backups)")
+    mk.add_argument("--to-data", action="store_true", help="Move it back into the data directory")
+    mk.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     bots = sub.add_parser("bots", help="List and inspect registered child bots")
     bots_sub = bots.add_subparsers(dest="bots_command")
     bots_sub.add_parser("list", help="List registered child bots (tokens are never shown)")
+    bs = bots_sub.add_parser("status", help="Health of every child bot (same view as /platform)")
+    bs.add_argument("--attention", action="store_true", help="Only bots that need attention")
+    bs.add_argument("--json", action="store_true", help="Machine-readable output")
+    bi = bots_sub.add_parser("inspect", help="Health, Business connection, telemetry and errors of one child bot")
+    bi.add_argument("bot_id", type=int, metavar="BOT_ID")
+    bi.add_argument("--probe", action="store_true",
+                    help="Also decrypt the token in memory and call getMe (token is never shown)")
+    bi.add_argument("--json", action="store_true", help="Machine-readable output")
     sub.add_parser("backup", help="Back up the database (scripts/backup.sh)")
     res = sub.add_parser("restore", help="Restore from a backup file (scripts/restore.sh)")
     res.add_argument("file", metavar="FILE", help="Path to a .sqlite3 backup or full-platform .tar.gz archive")
@@ -1144,6 +1220,16 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--send-test", action="store_true",
                         help="After confirmation, send a test message to the first configured admin")
     sub.add_parser("version", help="Show version")
+    mon = sub.add_parser("monitor", help="Live server/database monitoring (read-only)")
+    mon.add_argument("section", nargs="?", default="cpu",
+                     choices=["cpu", "memory", "disk", "network", "processes", "database", "telegram"])
+    mon.add_argument("--json", action="store_true", help="Machine-readable output")
+    mon.add_argument("-w", "--watch", type=float, metavar="SECONDS", help="Refresh continuously")
+    dash = sub.add_parser("dashboard", help="Full-screen live health dashboard")
+    dash.add_argument("--once", action="store_true", help="Render one frame and exit")
+    dash.add_argument("--refresh", type=float, default=2.0, help="Refresh interval (seconds)")
+    hc = sub.add_parser("health", help="Health check for cron/monitoring (exit 0 ok, 1 warn, 2 crit)")
+    hc.add_argument("--json", action="store_true", help="Machine-readable output")
     un = sub.add_parser("uninstall", help="Uninstall ZIKO (scripts/uninstall.sh)")
     un.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     return p
@@ -1251,8 +1337,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         if c == "config":
             return cmd_config(args.edit)
         if c == "update":
-            return cmd_update(args.yes, args.repo, args.version, args.channel, args.check)
+            return _update_dispatch(args)
+        if c == "security":
+            from app import cli_security
+            values, problem = _read_env()
+            if problem is not None:
+                print("Cannot read configuration; run with sudo.", file=sys.stderr)
+                return 1
+            if args.security_command == "rotate-key":
+                return cli_security.cmd_rotate_key(
+                    db_path=_db_path(values), service_state=service_state, yes=args.yes,
+                    values=values or {})
+            if args.security_command == "move-key":
+                return cli_security.cmd_move_key(
+                    db_path=_db_path(values), env_file=_env_path(), values=values or {},
+                    service_state=service_state, to_data=args.to_data, yes=args.yes)
+            return cli_security.cmd_audit(
+                env_file=_env_path(), db_path=_db_path(values), values=values or {},
+                as_json=getattr(args, "json", False))
         if c == "bots":
+            if args.bots_command == "inspect":
+                from app import cli_telegram
+                values, problem = _read_env()
+                if problem is not None:
+                    print("Cannot read configuration; run with sudo.", file=sys.stderr)
+                    return 1
+                return cli_telegram.cmd_bot_inspect(
+                    args.bot_id, db_path=_db_path(values), api=_telegram_api,
+                    probe=args.probe, as_json=args.json, values=values or {})
+            if args.bots_command == "status":
+                from app import cli_bots
+                values, problem = _read_env()
+                if problem is not None:
+                    print("Cannot read configuration; run with sudo.", file=sys.stderr)
+                    return 1
+                return cli_bots.cmd_bots_status(db_path=_db_path(values), as_json=args.json,
+                                                attention=args.attention)
             if args.bots_command not in {None, "list"}:
                 parser.error("unsupported bots command")
             return cmd_bots_list()
@@ -1260,6 +1380,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_uninstall(args.yes)
         if c == "doctor":
             return cmd_doctor(args.send_test)
+        if c in {"monitor", "dashboard", "health"}:
+            from app import cli_monitor
+            values, _ = _read_env()
+            db = _db_path(values)
+            if c == "monitor" and args.section == "telegram":
+                from app import cli_telegram
+                return cli_telegram.cmd_monitor_telegram(
+                    db_path=db, token=(values or {}).get("BOT_TOKEN", ""), api=_telegram_api,
+                    as_json=args.json, watch=args.watch)
+            if c == "monitor":
+                return cli_monitor.cmd_monitor(args.section, data_dir=db.parent, db_path=db,
+                                               as_json=args.json, watch=args.watch)
+            if c == "dashboard":
+                return cli_monitor.cmd_dashboard(data_dir=db.parent, db_path=db, version=_version(),
+                                                 service_state=service_state,
+                                                 refresh=args.refresh, once=args.once)
+            rc, alerts = cli_monitor.health(db.parent, db)
+            if args.json:
+                print(json.dumps({"status": rc, "checks": [
+                    {"level": a, "metric": m, "detail": d} for a, m, d in alerts]}))
+            else:
+                for a, m, d in alerts:
+                    print(f"{a:<5} {m:<26} {d}")
+            return rc
         return {"status": cmd_status, "start": cmd_start, "stop": cmd_stop,
                 "restart": cmd_restart, "backup": cmd_backup}[c]()
     except KeyboardInterrupt:
