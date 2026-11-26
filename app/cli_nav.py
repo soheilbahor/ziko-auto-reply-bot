@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 # Words that always mean "go back one level" (or leave, from the main menu).
 BACK_WORDS = frozenset({"0", "b", "back", "q", "quit", "exit"})
+# Words that redraw the current screen (fresh measurements) without running anything.
+REFRESH_WORDS = frozenset({"r", "refresh", ""})
 
 ACTION, SUBMENU, BACK, EXIT = "action", "submenu", "back", "exit"
 
@@ -24,6 +26,8 @@ class Item:
     kind: str = ACTION
     target: str = ""  # action name for ACTION, menu name for SUBMENU
     danger: bool = False
+    icon: str = ""     # shown only on terminals that can display emoji
+    aliases: tuple[str, ...] = ()  # extra single-word shortcuts, e.g. "m" for Live Monitor
 
 
 @dataclass(frozen=True)
@@ -40,18 +44,36 @@ def _back() -> Item:
 
 MENUS: Mapping[str, Menu] = {
     "main": Menu("main", "ZIKO Menu", (
-        Item("1", "Dashboard", "Service, uptime, database and backups", ACTION, "status"),
-        Item("2", "Bot Management", "Start, stop, restart, configuration", SUBMENU, "bot"),
-        Item("3", "Tenant Management", "How sub-bots are managed (read-only)", ACTION, "tenants"),
-        Item("4", "Auto Reply Settings", "Where replies are configured", ACTION, "autoreply"),
-        Item("5", "Telegram Business", "Connection setup checklist", ACTION, "business"),
-        Item("6", "Update ZIKO", "Update to a newer version", ACTION, "update"),
-        Item("7", "System Status", "Full diagnostics (doctor)", ACTION, "doctor"),
-        Item("8", "Backup & Restore", "Back up or restore the database", SUBMENU, "backup"),
-        Item("9", "Logs", "Recent or live service logs", SUBMENU, "logs"),
-        Item("10", "Help / About", "Version, commands and keyboard help", ACTION, "help"),
-        Item("11", "Exit", "Close the menu", EXIT),
+        Item("1", "Dashboard", "Service, uptime, database and backups", ACTION, "status", icon="📊"),
+        Item("2", "Bot Management", "Start, stop, restart, configuration", SUBMENU, "bot", icon="🤖"),
+        Item("3", "Tenants", "Child bot status and inspection", SUBMENU, "tenants", icon="👥"),
+        Item("4", "Auto Reply", "Where replies are configured", ACTION, "autoreply", icon="💬"),
+        Item("5", "Telegram Business", "Connection setup checklist", ACTION, "business", icon="💼"),
+        Item("6", "Update", "Update to a newer version", ACTION, "update", icon="🔼"),
+        Item("7", "Diagnostics", "Full diagnostics (doctor)", ACTION, "doctor", icon="🩺"),
+        Item("8", "Backup & Restore", "Back up or restore the database", SUBMENU, "backup", icon="🔐"),
+        Item("9", "Logs", "Recent or live service logs", SUBMENU, "logs", icon="📜"),
+        Item("10", "Security", "Audit, key rotation, key location", SUBMENU, "security", icon="🔒"),
+        Item("11", "Live Monitor", "Full-screen live view, refreshed every 2 s", ACTION, "monitor_live",
+             icon="📈", aliases=("m",)),
+        Item("12", "Help / About", "Version, commands and keyboard help", ACTION, "help", icon="❓"),
+        Item("0", "Exit", "Close the menu", EXIT, icon="🚪"),
     )),
+    "tenants": Menu("tenants", "Tenants", (
+        Item("1", "Child bot status", "Every child bot with an English reason", ACTION, "bots_status"),
+        Item("2", "Inspect one bot", "Telemetry, database and log checks for a bot ID", ACTION, "bots_inspect"),
+        Item("3", "Registered child bots", "Registry list (tokens are never shown)", ACTION, "bots"),
+        Item("4", "How tenants work", "Read-only guide", ACTION, "tenants"),
+        _back(),
+    ), parent="main"),
+    "security": Menu("security", "Security", (
+        Item("1", "Security audit", "Permissions, hardening, key, backups (read-only)", ACTION, "security_audit"),
+        Item("2", "Rotate token key", "Re-encrypt every child-bot token (service must be stopped)",
+             ACTION, "security_rotate", True),
+        Item("3", "Move token key", "Move the key out of the data directory or back",
+             ACTION, "security_move", True),
+        _back(),
+    ), parent="main"),
     "bot": Menu("bot", "Bot Management", (
         Item("1", "Start service", "Start the ziko service", ACTION, "start"),
         Item("2", "Stop service", "Stop the ziko service", ACTION, "stop"),
@@ -83,7 +105,7 @@ def action_names(menus: Mapping[str, Menu] = MENUS) -> set[str]:
 def find_item(menu: Menu, choice: str) -> Item | None:
     choice = choice.strip().lower()
     for item in menu.items:
-        if item.key == choice:
+        if item.key == choice or choice in item.aliases:
             return item
     return None
 
@@ -108,6 +130,7 @@ def run_menus(
     * Ctrl-C / end-of-input at a menu prompt leaves the program.
     * Ctrl-C inside an action returns to the menu.
     * ``0``, ``b`` and ``q`` go back one level; from the main menu they exit.
+    * ``r`` or an empty line redraws the screen (fresh measurements).
     * Unknown input, or an item without a handler, only shows ``invalid``.
     """
     stack = ["main"]
@@ -119,6 +142,8 @@ def run_menus(
         except (EOFError, KeyboardInterrupt):
             return 0
         choice = raw.strip().lower()
+        if choice in REFRESH_WORDS and find_item(menu, choice) is None:
+            continue  # redraw with fresh measurements; nothing runs
         if choice in BACK_WORDS and find_item(menu, choice) is None:
             stack.pop()
             continue

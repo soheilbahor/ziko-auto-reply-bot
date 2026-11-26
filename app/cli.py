@@ -422,7 +422,9 @@ def _db_path(values: dict[str, str] | None) -> Path:
 def _last_backup() -> tuple[float | None, str | None]:
     """Return (mtime, problem). problem: None, 'none' or 'denied'."""
     try:
-        files = list(Path(os.environ.get("ZIKO_BACKUP_DIR", "/var/backups/ziko-assistant")).glob("ziko-*.sqlite3"))
+        root = Path(os.environ.get("ZIKO_BACKUP_DIR", "/var/backups/ziko-assistant"))
+        # Since 1.4 backups are age-encrypted (ziko-*.sqlite3.age); plain ones are legacy.
+        files = [*root.glob("ziko-*.sqlite3"), *root.glob("ziko-*.sqlite3.age")]
         times = [f.stat().st_mtime for f in files]
     except PermissionError:
         return None, "denied"
@@ -1294,7 +1296,67 @@ def _interactive() -> int:
             return 1
         return cmd_logs(int(raw))
 
+    from app import cli_home
+
+    env_values, _env_problem = _read_env()
+    env_values = env_values or {}
+    db = _db_path(env_values)
+    token = env_values.get("BOT_TOKEN", "")
+
+    def master_name() -> str | None:
+        ok, result = _telegram_api(token, "getMe", timeout=4.0)
+        if ok and isinstance(result, dict) and result.get("username"):
+            return str(result["username"])
+        return None
+
+    collector = cli_home.Collector(data_dir=db.parent, db_path=db,
+                                   master_name=master_name if _TOKEN_FORMAT.fullmatch(token) else None)
+
+    def home() -> cli_home.HomeModel:
+        import socket
+        return collector.collect(service=service_info(), version=_version(), update=update_status(),
+                                 host=socket.gethostname(), last_backup_at=_last_backup()[0])
+
+    def bots_status() -> int:
+        from app import cli_bots
+        return cli_bots.cmd_bots_status(db_path=db)
+
+    def bots_inspect() -> int:
+        from app import cli_telegram
+        raw = ui.ask("Bot ID (digits, empty = cancel)")
+        if not raw:
+            return 0
+        if not (raw.isascii() and raw.isdigit() and len(raw) <= 15):
+            ui.warn("A bot ID is a number, for example 9126874011.")
+            return 2
+        return cli_telegram.cmd_bot_inspect(int(raw), db_path=db, api=_telegram_api, probe=False,
+                                            as_json=False, values=env_values)
+
+    def security_audit() -> int:
+        from app import cli_security
+        return cli_security.cmd_audit(env_file=_env_path(), db_path=db, values=env_values)
+
+    def security_rotate() -> int:
+        from app import cli_security
+        return cli_security.cmd_rotate_key(db_path=db, service_state=service_state, yes=False,
+                                           values=env_values)
+
+    def security_move() -> int:
+        from app import cli_security
+        ui.info("1 = move the key OUT of the data directory (recommended)   2 = move it back")
+        choice = ui.ask("Select [1-2] (empty = cancel)")
+        if choice not in {"1", "2"}:
+            return 0
+        return cli_security.cmd_move_key(db_path=db, env_file=_env_path(), values=env_values,
+                                         service_state=service_state, to_data=choice == "2", yes=False)
+
+    def monitor_live() -> int:
+        return cli_home.live(home, console=ui.console)
+
     actions = {
+        "bots_status": bots_status, "bots_inspect": bots_inspect,
+        "security_audit": security_audit, "security_rotate": security_rotate,
+        "security_move": security_move, "monitor_live": monitor_live,
         "status": cmd_status, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
         "logs_tail": lambda: cmd_logs(50), "logs_follow": lambda: cmd_logs(50, follow=True),
         "logs_custom": logs_custom, "backup": cmd_backup, "restore": restore,
@@ -1304,7 +1366,8 @@ def _interactive() -> int:
         "autoreply": lambda: ui.show_guide("autoreply"),
         "business": lambda: ui.show_guide("business"),
     }
-    return ui.run_menu(actions, service_state, version=_version, version_error_fn=_version_error, update_status_fn=update_status)
+    return ui.run_menu(actions, service_state, version=_version, version_error_fn=_version_error,
+                       update_status_fn=update_status, home_fn=home)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

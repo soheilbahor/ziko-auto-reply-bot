@@ -1,3 +1,36 @@
+## [1.5.1] - 2026-11-26
+
+### Terminal panel (`sudo ziko`)
+- New home screen, refreshed on every return to the menu and with `r`:
+  - **Telegram**: Bot API state from the service's own telemetry, TCP ping to
+    `api.telegram.org` with 🟢 good / 🟡 slow / 🔴 very slow, a ping sparkline for this
+    session, master bot, child bots running / failed / queued, last successful API call,
+    HTTP 429 count since the service started.
+  - **System**: CPU and RAM bars (green / yellow / red) with session sparklines, load
+    average, disk, network rx/tx per second, and the service's own RAM and CPU.
+  - **Bots**: every bot with its state, API latency (p50) and reason.
+- Main menu as a grid with emoji. New entries: **Tenants** (child bot status, inspect one
+  bot), **Security** (audit, rotate key, move key; the last two still ask you to type
+  ROTATE / MOVE), **Live Monitor** (`11` or `m`, full screen, refresh every 2 s, Ctrl+C to
+  return). These features existed as commands since 1.5.0 but were not in the menu.
+- Values that cannot be measured show `n/a`; nothing is estimated. Terminals without
+  emoji/Unicode get a plain ASCII version.
+- "Last backup" now finds encrypted backups (`ziko-*.sqlite3.age`); before, it always
+  showed none.
+
+### Fixed: updater could not install a release (critical)
+- Under `umask 077` the extracted release was readable by root only. The staged
+  `backup.sh`, run as the service user, failed with "Permission denied", and after deploy
+  the service could not read `/opt/ziko-assistant/VERSION`, so the update rolled back.
+  Now: the work directory is traverse-only (`711`; database copies inside stay `0600`),
+  the staged release and the deployed code are `u=rwX,go=rX` (root-owned, read-only for
+  the service), the manual rollback path does the same, and the updater works from `/`.
+
+### Upgrade note
+- The updater that runs is the one **already installed**. Servers on 1.5.0 or older still
+  have the bug above; for that one update, run the corrected updater from the new
+  release (see `docs/UPGRADE_1.5.1.md`). From 1.5.1 on, `ziko update` works normally.
+
 ## [1.5.0] - 2026-11-26
 
 Upgrade notes and every behaviour change: see `docs/MIGRATION_1.5.md`.

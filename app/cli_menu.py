@@ -390,10 +390,42 @@ def _menu_panel(menu: cli_nav.Menu, stack: Sequence[str]) -> Panel:
                  width=_panel_width(), padding=(0, 1) if _narrow() else (0, 2))
 
 
+def _main_grid(menu: cli_nav.Menu) -> Panel:
+    """Main menu as a compact grid (4 columns on wide terminals) with optional emoji."""
+    entries = [i for i in menu.items if i.kind != cli_nav.EXIT]
+    cols = 4 if console.width >= 110 else 3 if console.width >= 84 else 2 if console.width >= 56 else 1
+    table = Table.grid(expand=True, padding=(0, 2))
+    for _ in range(cols):
+        table.add_column(no_wrap=True, overflow="ellipsis")
+    fancy = not _plain()
+    cells = []
+    for item in entries:
+        cell = Text.assemble((f"{item.key:>2} ", "accent"))
+        if fancy and item.icon:
+            cell.append(item.icon + " ")
+        cell.append(item.label, style="err" if item.danger else "#c0caf5")
+        cells.append(cell)
+    for start in range(0, len(cells), cols):
+        row = cells[start:start + cols]
+        table.add_row(*row, *([""] * (cols - len(row))))
+    return Panel(table, title=menu.title, title_align="left", border_style="#2b3a67",
+                 box=box.ROUNDED, padding=(0, 1))
+
+
 def _footer(stack: Sequence[str]) -> Text:
     if len(stack) == 1:
-        return Text("Enter a number  |  q or 0 = quit", style="muted")
-    return Text("Enter a number  |  b or 0 = back  |  q = quit", style="muted")
+        return Text("Enter a number  |  r = refresh  |  m = live monitor  |  q or 0 = quit", style="muted")
+    return Text("Enter a number  |  r = refresh  |  b or 0 = back  |  q = quit", style="muted")
+
+
+def _render_home(home_fn: Callable[[], object]) -> None:
+    from app import cli_home
+    try:
+        model = home_fn()
+    except Exception as exc:  # the dashboard must never block the menu
+        warn(f"Dashboard data unavailable ({type(exc).__name__}); the menu still works.")
+        return
+    console.print(cli_home.render(model, width=console.width, ascii_only=_ascii()))  # type: ignore[arg-type]
 
 
 def run_menu(
@@ -402,14 +434,23 @@ def run_menu(
     version: str | Callable[[], str] = "",
     version_error_fn: Callable[[], str | None] | None = None,
     update_status_fn: Callable[[], Mapping[str, object]] | None = None,
+    home_fn: Callable[[], object] | None = None,
 ) -> int:
-    """Nested CLI menu. All existing command handlers remain injected by app.cli."""
+    """Nested CLI menu. All existing command handlers remain injected by app.cli.
+
+    With ``home_fn`` (returns a cli_home.HomeModel) the main menu shows the live home
+    dashboard; without it, the compact service/update panels of earlier versions."""
     def show(menu: cli_nav.Menu, stack: Sequence[str]) -> None:
         if console.is_terminal:
             console.clear()
         current = version() if callable(version) else version
         version_error = version_error_fn() if version_error_fn else None
         print_logo(current, version_error=version_error)
+        if len(stack) == 1 and home_fn is not None:
+            _render_home(home_fn)
+            console.print(_main_grid(menu))
+            console.print(_footer(stack))
+            return
         console.print(Panel(
             Text.assemble(("Service: ", "bold"), indicator(state_fn())),
             title="Dashboard", border_style="cyan", box=box.ROUNDED,

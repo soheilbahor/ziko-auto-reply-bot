@@ -295,3 +295,75 @@ def test_update_sh_rollback_mode_has_the_safeguards():
     # rolling back to a release without key_location.py while the key is external is refused early
     assert '[[ ! -f "$WORK/rb/app/key_location.py" ]]' in body
     assert body.index("move-key --to-data") < body.index("stage SERVICE_STOP")
+
+
+# --------------------------------------------------------------------------- 1.5.1 permissions
+# Found on a real 1.4.2 -> 1.5.0 update: under `umask 077` the staged release was 0600 root,
+# so (a) the staged backup.sh, run as the service user, failed with "Permission denied" and
+# (b) after deploy the service (User=ziko) could not read /opt/ziko-assistant/VERSION and
+# the update rolled back. These checks pin the fix.
+def _update_sh() -> str:
+    return (Path(__file__).resolve().parents[1] / "scripts" / "update.sh").read_text()
+
+
+def _main_body(script: str) -> str:
+    return script[script.index("main() {"):]
+
+
+def test_update_works_from_a_directory_the_service_user_cannot_read():
+    body = _main_body(_update_sh())
+    assert 'cd / || die "cannot change to /"' in body
+    assert body.index('cd / ||') < body.index("WORK=\"$(mktemp -d)\"")
+
+
+def test_work_dir_is_traverse_only_not_listable():
+    body = _main_body(_update_sh())
+    mk = body.index("WORK=\"$(mktemp -d)\"")
+    assert body.index('chmod 711 "$WORK"') > mk
+    assert 'chmod 755 "$WORK"' not in body and 'chmod -R u=rwX,go=rX "$WORK"\n' not in body
+
+
+def test_staged_release_is_made_readable_before_the_service_user_runs_it():
+    body = _main_body(_update_sh())
+    fix = body.index('chmod -R u=rwX,go=rX "$WORK/stage"')
+    assert fix > body.index("stage STAGE_VALIDATE")
+    assert fix < body.index("stage BACKUP_START")                 # before backup.sh runs as ziko
+    assert fix < body.index('bash "$WORK/stage/scripts/backup.sh"')
+
+
+def test_deployed_code_is_root_owned_and_world_readable():
+    body = _main_body(_update_sh())
+    deploy = body[body.index("stage FILES_DEPLOY"):body.index("stage UNIT_INSTALL")]
+    assert deploy.index('chown -R root:root "$ROOT/$name"') < deploy.index('chmod -R u=rwX,go=rX "$ROOT/$name"')
+    assert deploy.index('chmod -R u=rwX,go=rX "$ROOT/$name"') < deploy.index("diff -rq")
+    assert "go+w" not in deploy and "a+w" not in deploy and "777" not in deploy
+
+
+def test_manual_rollback_also_restores_readable_permissions():
+    script = _update_sh()
+    body = script[script.index("manual_rollback() {"):script.index("cleanup() {")]
+    deploy = body[body.index("stage FILES_DEPLOY"):body.index("stage DEPENDENCIES_INSTALL")]
+    assert 'chmod -R u=rwX,go=rX "$ROOT/$(basename "$rb_entry")"' in deploy
+
+
+def test_permission_rule_gives_the_service_user_read_but_never_write(tmp_path):
+    """The exact chmod rule, applied to files created under umask 077 like the stage."""
+    import os
+    import stat
+    import subprocess
+    tree = tmp_path / "stage"
+    (tree / "app").mkdir(parents=True)
+    old = os.umask(0o077)
+    try:
+        (tree / "VERSION").write_text("1.5.1\n")
+        (tree / "app" / "main.py").write_text("x = 1\n")
+        (tree / "install.sh").write_text("#!/bin/bash\n")
+        os.chmod(tree / "install.sh", 0o700)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tree / "VERSION").stat().st_mode) == 0o600          # the bug
+    subprocess.run(["chmod", "-R", "u=rwX,go=rX", str(tree)], check=True)
+    mode = lambda p: stat.S_IMODE(p.stat().st_mode)  # noqa: E731
+    assert mode(tree / "VERSION") == 0o644 and mode(tree / "app" / "main.py") == 0o644
+    assert mode(tree / "app") == 0o755 and mode(tree) == 0o755
+    assert mode(tree / "install.sh") == 0o755                                # executables keep x

@@ -404,6 +404,12 @@ manual_rollback() {
   clear_code
   cp -a "$WORK/rb/." "$ROOT/"
   chown -R root:root "$ROOT"/app "$ROOT"/scripts "$ROOT"/deploy 2>/dev/null || true
+  local rb_entry
+  shopt -s dotglob nullglob
+  for rb_entry in "$WORK/rb"/*; do
+    chmod -R u=rwX,go=rX "$ROOT/$(basename "$rb_entry")"
+  done
+  shopt -u dotglob nullglob
   stage DEPENDENCIES_INSTALL
   DEPS_CHANGED=1
   install_requirements "$ROOT"
@@ -475,6 +481,9 @@ main() {
   done
 
   [[ "$EUID" -eq 0 ]] || die "run as root (sudo)"
+  # Commands run as the service user (runuser) inherit the working directory; /root is
+  # not readable for them. Work from / so nothing depends on where the operator stood.
+  cd / || die "cannot change to /"
   [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "invalid repository: $REPO"
   [[ "$CHANNEL" == "stable" || "$CHANNEL" == "beta" || "$CHANNEL" == "dev" ]] || die "channel must be stable or beta"
   [[ "$CHANNEL" == "dev" ]] && CHANNEL="beta"
@@ -500,6 +509,9 @@ main() {
   flock -n 9 || die "another update is running"
 
   WORK="$(mktemp -d)"
+  # Traverse-only for other users: the service user must reach $WORK/stage (scripts run
+  # as that user), but cannot list $WORK, and database copies inside stay 0600 (umask 077).
+  chmod 711 "$WORK"
   trap cleanup EXIT
 
   if [[ -n "${ROLLBACK_TO:-}" ]]; then
@@ -586,6 +598,9 @@ main() {
     fi
     tar -xzf "$WORK/$asset" -C "$WORK/stage" --strip-components=1
   fi
+  # umask 077 made every extracted file 0600 root. Release files are public code: make
+  # them readable so the service user can run the staged scripts and, after deploy, the app.
+  chmod -R u=rwX,go=rX "$WORK/stage"
   local f
   for f in app/main.py app/storage.py requirements.txt pyproject.toml scripts/update.sh \
            scripts/backup.sh scripts/restore-platform.sh scripts/verify_platform.py \
@@ -704,6 +719,8 @@ PY
     name="$(basename "$entry")"
     cp -a "$entry" "$ROOT/$name"
     chown -R root:root "$ROOT/$name"
+    # Root-owned, world-readable code: the service (User=ziko) must read it, never write it.
+    chmod -R u=rwX,go=rX "$ROOT/$name"
   done
   shopt -u dotglob nullglob
   # The installed tree must equal the verified stage (preserved entries are excluded).
