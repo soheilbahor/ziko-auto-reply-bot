@@ -137,8 +137,10 @@ def confirm_text_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def diagnosis_keyboard(ready: bool) -> InlineKeyboardMarkup:
+def diagnosis_keyboard(ready: bool, business_mode_off: bool = False) -> InlineKeyboardMarkup:
     rows = []
+    if business_mode_off:
+        rows.append([InlineKeyboardButton(text="⚙️ باز کردن @BotFather", url="https://t.me/BotFather")])
     if not ready:
         rows.append([_btn("📘 راهنمای اتصال", Action.GUIDE)])
     rows.append([_btn("🔄 بررسی دوباره", Action.DIAG)])
@@ -146,9 +148,18 @@ def diagnosis_keyboard(ready: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def onboarding_keyboard() -> InlineKeyboardMarkup:
+BOTFATHER_URL = "https://t.me/BotFather"
+
+
+def botfather_row() -> list[InlineKeyboardButton]:
+    """Opens @BotFather (Business Mode can only be switched on there)."""
+    return [InlineKeyboardButton(text="⚙️ باز کردن @BotFather", url=BOTFATHER_URL)]
+
+
+def onboarding_keyboard(business_mode_off: bool = False) -> InlineKeyboardMarkup:
     """First /start of a child bot that is not connected to a Business account yet."""
     return InlineKeyboardMarkup(inline_keyboard=[
+        *([botfather_row()] if business_mode_off else []),
         [_btn("🔄 اتصال را انجام دادم؛ بررسی کن", Action.DIAG)],
         [_btn("📚 انتخاب پیام آماده", "lib")],
         [_btn("🏠 منوی اصلی", Action.MENU)],

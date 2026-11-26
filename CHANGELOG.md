@@ -1,3 +1,18 @@
+## [1.5.5] - 2026-11-26
+
+### Changed
+- Child bots: Telegram creates every bot with Business Mode off, and the Bot API cannot
+  switch it on, so Chatbots showed "This bot doesn't support Secretary Mode yet". ZIKO now
+  reads `can_connect_to_business` (getMe) and, while it is off:
+  - the master's "bot connected" message starts with the @BotFather steps;
+  - the child bot's first `/start` guide shows them first;
+  - Diagnose reports `business_mode_off` as the first blocker with the exact steps.
+  The value is cached for 60 s and re-read when the owner presses "check".
+- An "⚙️ باز کردن @BotFather" button is shown in all three places while Business Mode is
+  off (or unknown, for the master's message), and the child guide names the exact bot.
+- Telegram offers no API to switch Business Mode on (no setMyModes; managed-bot creation
+  takes only name, username and manager), so the owner still turns it on once.
+
 ## [1.5.4] - 2026-11-26
 
 ### Fixed

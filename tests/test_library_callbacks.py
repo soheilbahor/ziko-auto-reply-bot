@@ -176,3 +176,12 @@ def test_onboarding_keyboard_offers_check_library_and_menu():
     buttons = [b for row in onboarding_keyboard().inline_keyboard for b in row]
     actions = [AdminCB.unpack(b.callback_data).action for b in buttons]
     assert actions == ["diag", "lib", "menu"]
+    off = [b for row in onboarding_keyboard(business_mode_off=True).inline_keyboard for b in row]
+    assert off[0].url == "https://t.me/BotFather" and off[0].callback_data is None
+
+
+def test_diagnosis_keyboard_adds_botfather_only_when_business_mode_is_off():
+    from app.keyboards.admin import diagnosis_keyboard
+    def urls(**kw):
+        return [b.url for row in diagnosis_keyboard(False, **kw).inline_keyboard for b in row if b.url]
+    assert urls() == [] and urls(business_mode_off=True) == ["https://t.me/BotFather"]

@@ -210,7 +210,38 @@ def create_admin_router(
     transition_lock = asyncio.Lock()
 
     # ------------------------------ rendering ------------------------------ #
-    async def diagnose() -> panel_health.Diagnosis:
+    # getMe is cheap but not free: cache Business Mode for 60 s. Short, because the owner
+    # turns it on in @BotFather and then presses "check" right away.
+    mode_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
+    async def business_mode(bot: Any) -> bool | None:
+        """``can_connect_to_business`` of this bot, or None when unknown (never blocks)."""
+        if not onboarding or bot is None:
+            return None
+        import time as _time
+        now = _time.monotonic()
+        if mode_cache["value"] is not None and now - mode_cache["at"] < 60:
+            return mode_cache["value"]
+        try:
+            me = await bot.get_me()
+        except Exception:
+            return None
+        value = getattr(me, "can_connect_to_business", None)
+        if isinstance(value, bool):
+            mode_cache.update(at=now, value=value)
+            return value
+        return None
+
+    def _mode_off(result: panel_health.Diagnosis) -> bool:
+        return any(f.code == "business_mode_off" for f in result.findings)
+
+    async def _me(bot: Any) -> Any:
+        try:
+            return await bot.get_me()
+        except Exception:
+            return None
+
+    async def diagnose(bot: Any = None) -> panel_health.Diagnosis:
         """Evaluate every gate the reply engine applies. Read-only, a few small queries."""
         app_state = await db.get_app_state()
         status = await db.get_status(app_state.active_status_key) if app_state.active_status_key else None
@@ -229,14 +260,14 @@ def create_admin_router(
         return panel_health.diagnose(
             connection=await db.get_business_connection(), app_state=app_state, status=status,
             owner=await db.get_owner_settings(), stats=stats, problems=problems,
-            exceptions_count=exceptions_count,
+            exceptions_count=exceptions_count, business_mode=await business_mode(bot),
         )
 
-    async def build_menu() -> tuple[str, InlineKeyboardMarkup]:
+    async def build_menu(bot: Any = None) -> tuple[str, InlineKeyboardMarkup]:
         state = await db.get_app_state()
         statuses = await db.list_statuses()
         try:
-            badge = (await diagnose()).badge
+            badge = (await diagnose(bot)).badge
         except Exception:  # the menu must always render, even if diagnosis fails
             logger.warning("Readiness badge unavailable", exc_info=True)
             badge = None
@@ -262,11 +293,11 @@ def create_admin_router(
                 raise
 
     async def show_menu_in_callback(callback: CallbackQuery) -> None:
-        text, markup = await build_menu()
+        text, markup = await build_menu(callback.bot)
         await edit_callback_message(callback, text, markup)
 
     async def send_menu(message: Message, prefix: str = "") -> None:
-        text, markup = await build_menu()
+        text, markup = await build_menu(message.bot)
         await message.answer(
             f"{prefix}{text}", parse_mode=ParseMode.HTML, reply_markup=markup
         )
@@ -319,8 +350,11 @@ def create_admin_router(
                 connection = None
             if connection is None or not connection.is_enabled or not connection.can_reply:
                 # Not connected yet: one answer only, the guide (its keyboard leads to the menu).
-                await message.answer(panel_health.ONBOARDING, parse_mode=ParseMode.HTML,
-                                     reply_markup=onboarding_keyboard())
+                mode = await business_mode(message.bot)
+                me = await _me(message.bot) if mode is False else None
+                await message.answer(panel_health.onboarding_text(mode, getattr(me, "username", None)),
+                                     parse_mode=ParseMode.HTML,
+                                     reply_markup=onboarding_keyboard(business_mode_off=mode is False))
                 return
         await send_menu(message)
 
@@ -497,9 +531,11 @@ def create_admin_router(
     @router.callback_query(AdminCB.filter(F.action == Action.DIAG))
     async def cb_diag(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
-        result = await diagnose()
+        mode_cache["value"] = None   # "check" must see a Business Mode switched on a moment ago
+        result = await diagnose(callback.bot)
         await edit_callback_message(
-            callback, panel_health.render(result), diagnosis_keyboard(result.ready))
+            callback, panel_health.render(result),
+            diagnosis_keyboard(result.ready, _mode_off(result)))
         await _safe_callback_answer(callback, "بررسی شد." if result.ready else None)
 
     @router.callback_query(AdminCB.filter(F.action == Action.GUIDE))
@@ -511,9 +547,9 @@ def create_admin_router(
     @router.message(Command("diagnose", "doctor"))
     async def cmd_diagnose(message: Message, state: FSMContext) -> None:
         await state.clear()
-        result = await diagnose()
+        result = await diagnose(message.bot)
         await message.answer(panel_health.render(result), parse_mode=ParseMode.HTML,
-                             reply_markup=diagnosis_keyboard(result.ready))
+                             reply_markup=diagnosis_keyboard(result.ready, _mode_off(result)))
 
     @router.message(Command("help"))
     async def cmd_help(message: Message, state: FSMContext) -> None:

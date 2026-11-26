@@ -124,9 +124,9 @@ async def feed(registry: Registry, monkeypatch: Any = None, rejected: set[str] |
 
 
 @pytest.mark.asyncio
-async def test_managed_bot_update_is_handled_and_registers_the_bot():
+async def test_managed_bot_update_is_handled_and_registers_the_bot(monkeypatch):
     registry = Registry()
-    result, manager, session = await feed(registry)
+    result, manager, session = await feed(registry, monkeypatch)   # no real network
     assert result is not UNHANDLED
     assert "GetManagedBotToken" in session.calls
     assert len(registry.added) == 1
@@ -136,8 +136,8 @@ async def test_managed_bot_update_is_handled_and_registers_the_bot():
     notices = [m for m in session.sent if m["chat_id"] == OWNER]
     assert len(notices) == 1 and "@NewZikoBot" in notices[0]["text"]
     assert CHILD_TOKEN not in notices[0]["text"]
-    button = notices[0]["markup"].inline_keyboard[0][0]          # the master announces + links
-    assert button.url == "https://t.me/NewZikoBot" and "/start" in notices[0]["text"]
+    urls = [b.url for row in notices[0]["markup"].inline_keyboard for b in row]   # announce + links
+    assert urls[-1] == "https://t.me/NewZikoBot" and "/start" in notices[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -206,3 +206,26 @@ async def test_disabled_but_alive_bot_is_not_replaced(monkeypatch):
     registry.add_tenant = add
     await feed(registry, monkeypatch, rejected=set())
     assert calls == [[]]
+
+
+
+def test_connected_text_shows_botfather_steps_only_when_needed():
+    from app.handlers.tenants import connected_text
+    off = connected_text("NewZikoBot", business_mode=False)
+    on = connected_text("NewZikoBot", business_mode=True)
+    unknown = connected_text("NewZikoBot", business_mode=None)
+    assert "Business Mode" in off and "خاموش" in off and "@BotFather" in off
+    assert "@BotFather" not in on and "Chatbots" in on
+    assert "@BotFather" in unknown and "اگر هنوز روشن نیست" in unknown
+    for text in (off, on, unknown):
+        assert "Premium" not in text and "/start" in text
+
+
+
+def test_connected_keyboard_offers_botfather_unless_business_mode_is_on():
+    from app.handlers.tenants import connected_keyboard
+    def urls(mode):
+        return [b.url for row in connected_keyboard("NewZikoBot", mode).inline_keyboard for b in row]
+    assert urls(False) == ["https://t.me/BotFather", "https://t.me/NewZikoBot"]
+    assert urls(None) == ["https://t.me/BotFather", "https://t.me/NewZikoBot"]
+    assert urls(True) == ["https://t.me/NewZikoBot"]

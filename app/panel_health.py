@@ -33,6 +33,17 @@ CONNECT_GUIDE = (
 )
 
 
+BUSINESS_MODE_STEPS = (
+    "⚙️ <b>اول باید «Business Mode» ربات روشن شود</b>\n"
+    "تلگرام این گزینه را برای هر ربات تازه خاموش میسازد و فقط خود شما میتوانید روشنش کنید "
+    "(یک بار، حدود ۳۰ ثانیه):\n"
+    "   ۱. @BotFather را باز کنید (دکمهٔ «⚙️ باز کردن @BotFather» پایین) و /mybots بفرستید.\n"
+    "   ۲. همین ربات را انتخاب کنید.\n"
+    "   ۳. Bot Settings ← Business Mode ← Turn on\n"
+    "تا این کار انجام نشود، تلگرام در Chatbots مینویسد "
+    "«This bot doesn't support Secretary Mode yet».\n\n"
+)
+
 ONBOARDING = (
     "👋 <b>به ربات اختصاصی‌تان خوش آمدید!</b>\n\n"
     "این ربات وقتی در دسترس نیستید، از طرف <b>حساب تلگرام شما</b> به پیام‌ها پاسخ می‌دهد. "
@@ -100,12 +111,32 @@ def _hour_allowed(now_utc: datetime, tz: str, start: int | None, end: int | None
     return start <= hour < end if start < end else (hour >= start or hour < end)
 
 
+def onboarding_text(business_mode: bool | None, username: str | None = None) -> str:
+    """The child bot's first /start. Business Mode steps come first when it is known off;
+    with ``username`` the step names the exact bot to pick in /mybots."""
+    if business_mode is False:
+        steps = BUSINESS_MODE_STEPS
+        if username:
+            steps = steps.replace("۲. همین ربات را انتخاب کنید.", f"۲. ربات <b>@{html.escape(username)}</b> را انتخاب کنید.", 1)
+        return ONBOARDING.replace("برای شروع فقط سه قدم:\n\n", "برای شروع فقط سه قدم:\n\n" + steps, 1)
+    return ONBOARDING
+
+
 def diagnose(*, connection: Any, app_state: Any, status: Any, owner: Any,
              stats: dict[str, int] | None = None, problems: list[str] | None = None,
-             exceptions_count: int = 0, now: datetime | None = None) -> Diagnosis:
-    """All arguments are the objects the storage layer already returns (or None)."""
+             exceptions_count: int = 0, now: datetime | None = None,
+             business_mode: bool | None = None) -> Diagnosis:
+    """All arguments are the objects the storage layer already returns (or None).
+
+    ``business_mode``: the bot's ``can_connect_to_business`` from getMe; None = unknown."""
     now = now or datetime.now(UTC)
     f: list[Finding] = []
+
+    # Gate 0 -- Business Mode switched on in @BotFather (Telegram creates bots with it off).
+    if business_mode is False and (connection is None or not connection.is_enabled):
+        f.append(Finding(BLOCK, "Business Mode این ربات در BotFather خاموش است", code="business_mode_off", fix=
+                         "@BotFather ← /mybots ← همین ربات ← Bot Settings ← Business Mode ← Turn on. "
+                         "بعد در Settings ← Telegram Business ← Chatbots ربات را انتخاب کنید."))
 
     # Gate 1 -- Business connection exists, is enabled, and may reply.
     if connection is None:

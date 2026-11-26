@@ -46,6 +46,15 @@ def _open_bot_row(username: str) -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text=f"🤖 باز کردن @{username}", url=f"https://t.me/{username}")]
 
 
+def connected_keyboard(username: str, business_mode: bool | None) -> InlineKeyboardMarkup:
+    """Under the master's "bot connected" message: BotFather first while Business Mode may be off."""
+    rows = []
+    if business_mode is not True:
+        rows.append([InlineKeyboardButton(text="⚙️ باز کردن @BotFather", url="https://t.me/BotFather")])
+    rows.append(_open_bot_row(username))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _welcome_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✨ ساخت ربات جدید", callback_data=CREATE_CB)],
@@ -53,17 +62,33 @@ def _welcome_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def connected_text(username: str, *, token_note: str = "") -> str:
-    """Sent by the master bot right after a child bot is registered."""
+def connected_text(username: str, *, token_note: str = "", business_mode: bool | None = None) -> str:
+    """Sent by the master bot right after a child bot is registered.
+
+    ``business_mode`` is the new bot's ``can_connect_to_business`` (None = unknown)."""
+    steps = []
+    if business_mode is not True:
+        steps.append(f"در <b>@BotFather</b>: /mybots ← @{username} ← Bot Settings ← "
+                     "<b>Business Mode ← Turn on</b>"
+                     + ("" if business_mode is False else " (اگر هنوز روشن نیست)") + ".")
+    steps.append("در تلگرام: <b>Settings ← Telegram Business ← Chatbots</b>، ربات را انتخاب و "
+                 "«Reply to messages» را روشن کنید.")
+    steps.append("ربات خودتان را باز کنید و /start بزنید؛ راهنمای کامل همان‌جاست.")
+    digits = "۱۲۳"
+    lines = "\n".join(f"{digits[i]}. {s}" for i, s in enumerate(steps))
+    warn = ("⚠️ Business Mode این ربات هنوز خاموش است؛ تا روشن نشود، تلگرام اجازهٔ اتصال نمی‌دهد.\n\n"
+            if business_mode is False else "")
     return (
         f"✅ <b>ربات شما وصل شد:</b> @{username}\n\n"
-        f"{token_note}"
-        "قدم بعدی، فقط دو کار:\n"
-        "۱. ربات خودتان را باز کنید و /start بزنید؛ راهنمای کامل همان‌جاست.\n"
-        "۲. در تلگرام: <b>Settings ← Telegram Business ← Chatbots</b>، ربات را انتخاب و "
-        "«Reply to messages» را روشن کنید.\n\n"
+        f"{token_note}{warn}"
+        f"قدم بعدی:\n{lines}\n\n"
         "توکن به‌صورت رمزنگاری‌شده ذخیره شد و هیچ‌جا نمایش داده نمی‌شود."
     )
+
+
+def _business_flag(user: Any) -> bool | None:
+    value = getattr(user, "can_connect_to_business", None)
+    return value if isinstance(value, bool) else None
 
 
 def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
@@ -307,8 +332,9 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         logger.info("Tenant registered user_id=%s bot_id=%s", user_id, tenant.bot_id)
         token_warning = "" if token_message_deleted else "⚠️ پیام حاوی توکن حذف نشد؛ لطفاً آن را از تاریخچه گفتگو پاک کنید.\n\n"
         await message.answer(
-            connected_text(tenant.username, token_note=token_warning), parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(tenant.username)]),
+            connected_text(tenant.username, token_note=token_warning, business_mode=_business_flag(me)),
+            parse_mode="HTML",
+            reply_markup=connected_keyboard(tenant.username, _business_flag(me)),
         )
 
     @router.message(BotSetup.waiting_for_token)
@@ -431,9 +457,19 @@ def create_tenant_router(*, dispatcher: Dispatcher, registry: TenantRegistry,
         logger.info("Managed bot registered owner_id=%s bot_id=%s", owner_id, child.id)
         await manager.start_tenant(tenant)
         try:
+            mode = None
+            probe = None
+            try:
+                probe = Bot(token=token)
+                mode = _business_flag(await probe.get_me())
+            except Exception:
+                mode = None
+            finally:
+                if probe is not None:
+                    await probe.session.close()
             await bot.send_message(
-                owner_id, connected_text(tenant.username), parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_open_bot_row(tenant.username)]),
+                owner_id, connected_text(tenant.username, business_mode=mode), parse_mode="HTML",
+                reply_markup=connected_keyboard(tenant.username, mode),
             )
         except Exception:
             logger.warning("Could not notify managed bot owner owner_id=%s bot_id=%s", owner_id, child.id)

@@ -1,6 +1,8 @@
 """Owner-facing reply diagnosis (app/panel_health.py)."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -130,3 +132,39 @@ def test_connect_guide_states_telegram_limits_honestly():
     # Since 2026 connecting a bot needs no Premium; the guide must not claim otherwise.
     assert "Premium لازم نیست" in ph.CONNECT_GUIDE and "فقط با <b>Telegram Premium</b>" not in ph.CONNECT_GUIDE
     assert "Premium لازم نیست" in ph.ONBOARDING
+
+
+
+def test_business_mode_off_is_the_first_blocker_and_has_botfather_steps():
+    state = SimpleNamespace(enabled=False, active_status_key=None)
+    d = ph.diagnose(connection=None, app_state=state, status=None, owner=None, business_mode=False)
+    blockers = [f for f in d.findings if f.level == ph.BLOCK]
+    assert blockers[0].code == "business_mode_off" and "@BotFather" in blockers[0].fix
+    assert "BotFather" in d.badge
+
+
+def test_business_mode_unknown_or_on_adds_nothing():
+    state = SimpleNamespace(enabled=False, active_status_key=None)
+    for mode in (None, True):
+        d = ph.diagnose(connection=None, app_state=state, status=None, owner=None, business_mode=mode)
+        assert "business_mode_off" not in [f.code for f in d.findings]
+
+
+def test_business_mode_check_is_skipped_once_connected():
+    state = SimpleNamespace(enabled=False, active_status_key=None)
+    conn = SimpleNamespace(is_enabled=True, can_reply=True)
+    d = ph.diagnose(connection=conn, app_state=state, status=None, owner=None, business_mode=False)
+    assert "business_mode_off" not in [f.code for f in d.findings]
+
+
+def test_onboarding_text_puts_botfather_first_only_when_off():
+    assert ph.onboarding_text(None) == ph.ONBOARDING and ph.onboarding_text(True) == ph.ONBOARDING
+    off = ph.onboarding_text(False)
+    assert off.index("Business Mode") < off.index("اتصال به حساب تلگرام") and "/mybots" in off
+
+
+
+def test_onboarding_names_the_exact_bot_and_escapes_it():
+    text = ph.onboarding_text(False, "Ziko213194a78fBot")
+    assert "@Ziko213194a78fBot" in text and "@BotFather" in text
+    assert "<script>" not in ph.onboarding_text(False, "<script>")
